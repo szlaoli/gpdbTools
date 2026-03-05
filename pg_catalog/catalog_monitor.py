@@ -1,42 +1,53 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+from __future__ import print_function
 import os
 import subprocess
 import sys
 
 
-hostname: str = "localhost"
-port: str = "5432"
-database: str = ""
-username: str = ""
-gpver: str = ""
+hostname = "localhost"
+port = "5432"
+database = ""
+username = ""
+gpver = ""
 
 
-def set_env() -> None:
+def set_env():
     os.environ["PGHOST"] = "localhost"
     os.environ["PGDATABASE"] = database
     os.environ["PGUSER"] = username
     os.environ["PGPASSWORD"] = ""
 
 
-def run_psql(sql: str, extra_args: list[str] | None = None) -> tuple[int, str]:
+def run_psql(sql, extra_args=None):
     args = ["psql", "-A", "-X", "-t", "-c", sql]
     if extra_args:
         args.extend(extra_args)
-    result = subprocess.run(args, capture_output=True, text=True)
-    return result.returncode >> 8 if result.returncode > 255 else result.returncode, result.stdout.strip()
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    return proc.returncode >> 8 if proc.returncode > 255 else proc.returncode, out.strip()
 
 
-def run_psql_utility(sql: str, quiet: bool = False) -> tuple[int, str]:
+def run_psql_utility(sql, quiet=False):
     cmd_args = ["psql", "-A", "-X", "-t", "-c", sql]
     if quiet:
         cmd_args.insert(3, "-q")
     env = dict(os.environ)
     env["PGOPTIONS"] = "-c gp_session_role=utility"
-    result = subprocess.run(cmd_args, capture_output=True, text=True, env=env)
-    return result.returncode, result.stdout.strip()
+    proc = subprocess.Popen(cmd_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    return proc.returncode, out.strip()
 
 
-def get_gpver() -> str:
+def get_gpver():
     sql = "select version();"
     ret, sver = run_psql(sql, ["-d", "postgres"])
     if ret:
@@ -49,7 +60,7 @@ def get_gpver() -> str:
     return tmpver[0]
 
 
-def catalog_history() -> int:
+def catalog_history():
     # pg_tables count
     ret, table_count = run_psql("select count(*) from pg_tables;")
     if ret:
@@ -190,43 +201,47 @@ def catalog_history() -> int:
         return -1
 
     # Print results
-    print(f"---{database}---pg_catalog info---")
-    print(f"pg_tables count:                     {table_count}")
-    print(f"pg_views count:                      {view_count}")
-    print(f"pg_namespace count:                  {pg_namespace_count}")
-    print(f"pg_namespace size:                   {pg_namespace_size}")
-    print(f"pg_namespace size in master:         {pg_namespace_master}")
-    print(f"pg_namespace size in gpseg0:         {pg_namespace_gpseg0}")
-    print(f"pg_namespace bloat in master:        {pg_namespace_master_bloat}")
-    print(f"pg_class count:                      {pg_class_count}")
-    print(f"pg_class size:                       {pg_class_size}")
-    print(f"pg_class size in master:             {pg_class_master}")
-    print(f"pg_class size in gpseg0:             {pg_class_gpseg0}")
-    print(f"pg_class bloat in master:            {pg_class_master_bloat}")
-    print(f"pg_attribute count:                  {pg_attribute_count}")
-    print(f"pg_attribute size:                   {pg_attribute_size}")
-    print(f"pg_attribute size in master:         {pg_attribute_master}")
-    print(f"pg_attribute size in gpseg0:         {pg_attribute_gpseg0}")
-    print(f"pg_attribute bloat in master:        {pg_attribute_master_bloat}")
-    print(f"pg_partition_rule count:             {pg_partition_rule_count}")
-    print(f"pg_partition_rule size in master:    {pg_partition_rule_size}")
-    print(f"pg_partition_rule bloat in master:   {pg_partition_rule_bloat}")
-    print(f"pg_statistic count:                  {pg_statistic_count}")
-    print(f"pg_statistic size in master:         {pg_statistic_size}")
-    print()
+    print("---{}---pg_catalog info---".format(database))
+    print("pg_tables count:                     {}".format(table_count))
+    print("pg_views count:                      {}".format(view_count))
+    print("pg_namespace count:                  {}".format(pg_namespace_count))
+    print("pg_namespace size:                   {}".format(pg_namespace_size))
+    print("pg_namespace size in master:         {}".format(pg_namespace_master))
+    print("pg_namespace size in gpseg0:         {}".format(pg_namespace_gpseg0))
+    print("pg_namespace bloat in master:        {}".format(pg_namespace_master_bloat))
+    print("pg_class count:                      {}".format(pg_class_count))
+    print("pg_class size:                       {}".format(pg_class_size))
+    print("pg_class size in master:             {}".format(pg_class_master))
+    print("pg_class size in gpseg0:             {}".format(pg_class_gpseg0))
+    print("pg_class bloat in master:            {}".format(pg_class_master_bloat))
+    print("pg_attribute count:                  {}".format(pg_attribute_count))
+    print("pg_attribute size:                   {}".format(pg_attribute_size))
+    print("pg_attribute size in master:         {}".format(pg_attribute_master))
+    print("pg_attribute size in gpseg0:         {}".format(pg_attribute_gpseg0))
+    print("pg_attribute bloat in master:        {}".format(pg_attribute_master_bloat))
+    print("pg_partition_rule count:             {}".format(pg_partition_rule_count))
+    print("pg_partition_rule size in master:    {}".format(pg_partition_rule_size))
+    print("pg_partition_rule bloat in master:   {}".format(pg_partition_rule_bloat))
+    print("pg_statistic count:                  {}".format(pg_statistic_count))
+    print("pg_statistic size in master:         {}".format(pg_statistic_size))
+    print("")
 
     return 0
 
 
-def main() -> int:
+def main():
     global database, username, gpver
 
     if len(sys.argv) != 2:
-        print(f"Argument number Error\nExample:\npython3 {sys.argv[0]} dbname")
+        print("Argument number Error\nExample:\npython {} dbname".format(sys.argv[0]))
         sys.exit(1)
 
     database = sys.argv[1]
-    username = subprocess.run(["whoami"], capture_output=True, text=True).stdout.strip()
+    proc = subprocess.Popen(["whoami"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    username = out.strip()
 
     set_env()
     gpver = get_gpver()

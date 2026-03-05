@@ -1,7 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+from __future__ import print_function
 """GPDB analyze for daily use.
 
-Command line: python3 analyze_for_daily.py dbname schemaname concurrency
+Command line: python analyze_for_daily.py dbname schemaname concurrency
 If schemaname=ALL, all schema will be analyzed!
 """
 
@@ -11,6 +12,8 @@ import sys
 import time
 from datetime import datetime, timedelta
 from multiprocessing import Process
+
+_DEVNULL = open(os.devnull, 'w')
 
 EXCLUDE_SCHEMA = """
  'gp_toolkit'
@@ -35,7 +38,7 @@ EXCLUDE_SCHEMA = """
 """
 
 
-def set_env(database: str, username: str) -> int:
+def set_env(database, username):
     os.environ["PGHOST"] = "localhost"
     os.environ["PGDATABASE"] = database
     os.environ["PGUSER"] = username
@@ -43,149 +46,148 @@ def set_env(database: str, username: str) -> int:
     return 0
 
 
-def get_curr_datetime() -> str:
+def get_curr_datetime():
     """Return datetime string for yesterday (matches Perl: time()-86400)."""
     yesterday = datetime.now() - timedelta(days=1)
     return yesterday.strftime("%Y%m%d%H%M%S")
 
 
-def run_psql(sql: str, quiet: bool = False) -> tuple[int, str]:
+def run_psql(sql, quiet=False):
     """Run psql command and return (returncode, output)."""
     cmd = ["psql", "-A", "-X", "-t"]
     if quiet:
         cmd.append("-q")
     cmd.extend(["-c", sql])
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode, result.stdout
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    return proc.returncode, out
 
 
-def run_psql_stderr_suppressed(sql: str, quiet: bool = False) -> tuple[int, str]:
+def run_psql_stderr_suppressed(sql, quiet=False):
     """Run psql with stderr suppressed (2>/dev/null)."""
     cmd = ["psql", "-A", "-X", "-t"]
     if quiet:
         cmd.append("-q")
     cmd.extend(["-c", sql])
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
-    return result.returncode, result.stdout
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=_DEVNULL)
+    out, _ = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    return proc.returncode, out
 
 
-def get_schema(inputschema: str) -> str:
+def get_schema(inputschema):
     if inputschema == "ALL":
         sql = (
-            f" select string_agg(''''||nspname||'''',',' ) from pg_namespace"
-            f" where nspname not like 'pg%' and nspname not like 'gp%' and"
-            f" nspname not in ({EXCLUDE_SCHEMA}); "
+            " select string_agg(''''||nspname||'''',',' ) from pg_namespace"
+            " where nspname not like 'pg%' and nspname not like 'gp%' and"
+            " nspname not in ({});".format(EXCLUDE_SCHEMA)
         )
         ret, tmpsss = run_psql_stderr_suppressed(sql)
         if ret >> 8 if ret > 255 else ret:
             print("psql get all schema error")
             sys.exit(1)
         tmpsss = tmpsss.strip()
-        curr_schema = f"({tmpsss})"
+        curr_schema = "({})".format(tmpsss)
     else:
         tmpsss = inputschema.replace(",", "','")
-        curr_schema = f"('{tmpsss}')"
+        curr_schema = "('{}')".format(tmpsss)
 
-    print(f"analyze schema [{curr_schema}]")
+    print("analyze schema [{}]".format(curr_schema))
     return curr_schema
 
 
-def get_tablelist(
-    curr_schema: str, currdatetime: str
-) -> tuple[int, list[str]]:
-    target_tablelist: list[str] = []
+def get_tablelist(curr_schema, currdatetime):
+    target_tablelist = []
 
     tmp_schemastr = curr_schema.replace("'", "''")
-    print(f"tmp_schemastr[{tmp_schemastr}]")
+    print("tmp_schemastr[{}]".format(tmp_schemastr))
 
     # Heap table list
     sql = (
-        f" select 'analyze '||aa.nspname||'.'||bb.relname||';'"
-        f" from pg_namespace aa inner join pg_class bb on aa.oid=bb.relnamespace"
-        f" left join pg_stat_last_operation o on bb.oid=o.objid and o.staactionname='ANALYZE'"
-        f" where aa.nspname in {curr_schema} and bb.relkind='r' and bb.relstorage='h' and bb.relhassubclass=false"
-        f" and ((o.statime is null) or ((o.statime is not null) and (now() - o.statime > interval '3 day')));"
+        " select 'analyze '||aa.nspname||'.'||bb.relname||';'"
+        " from pg_namespace aa inner join pg_class bb on aa.oid=bb.relnamespace"
+        " left join pg_stat_last_operation o on bb.oid=o.objid and o.staactionname='ANALYZE'"
+        " where aa.nspname in {} and bb.relkind='r' and bb.relstorage='h' and bb.relhassubclass=false"
+        " and ((o.statime is null) or ((o.statime is not null) and (now() - o.statime > interval '3 day')));".format(curr_schema)
     )
     ret, output = run_psql(sql)
     if ret:
-        print(f"Get heap table list error ={sql}=")
+        print("Get heap table list error ={}=".format(sql))
         return -1, []
     target_tablelist.extend(output.splitlines())
 
     # AO table list
     sql = (
-        f" drop table if exists analyze_target_list_{currdatetime};"
-        f" create table analyze_target_list_{currdatetime} (like check_ao_state);"
-        f""
-        f" insert into analyze_target_list_{currdatetime}"
-        f" select *,current_timestamp from get_AOtable_state_list('{tmp_schemastr}') a;"
-        f""
-        f" create temp table ao_analyze_stat_temp ("
-        f"   reloid bigint,"
-        f"   schemaname text,"
-        f"   tablename text,"
-        f"   statime timestamp without time zone"
-        f" ) distributed by (reloid);"
-        f""
-        f" insert into ao_analyze_stat_temp"
-        f" select objid,schemaname,objname,statime from pg_stat_operations op"
-        f" inner join ("
-        f"   select reloid,last_checktime,row_number() over(partition by reloid order by last_checktime desc) rn"
-        f"   from check_ao_state"
-        f" ) aost"
-        f" on op.objid=aost.reloid"
-        f" where op.actionname='ANALYZE' and aost.rn=1 and op.statime>=aost.last_checktime;"
-        f""
-        f" select 'analyze '||schemaname||'.'||tablename||';' from"
-        f" ("
-        f"   select a.reloid,a.schemaname,a.tablename"
-        f"   from check_ao_state a,analyze_target_list_{currdatetime} b"
-        f"   where a.reloid=b.reloid and a.modcount<>b.modcount"
-        f"   union all"
-        f"   select b.reloid,b.schemaname,b.tablename"
-        f"   from analyze_target_list_{currdatetime} b"
-        f"   where b.reloid not in (select reloid from check_ao_state)"
-        f" ) t1"
-        f" where t1.reloid not in (select reloid from ao_analyze_stat_temp);"
+        " drop table if exists analyze_target_list_{currdatetime};"
+        " create table analyze_target_list_{currdatetime} (like check_ao_state);"
+        ""
+        " insert into analyze_target_list_{currdatetime}"
+        " select *,current_timestamp from get_AOtable_state_list('{tmp_schemastr}') a;"
+        ""
+        " create temp table ao_analyze_stat_temp ("
+        "   reloid bigint,"
+        "   schemaname text,"
+        "   tablename text,"
+        "   statime timestamp without time zone"
+        " ) distributed by (reloid);"
+        ""
+        " insert into ao_analyze_stat_temp"
+        " select objid,schemaname,objname,statime from pg_stat_operations op"
+        " inner join ("
+        "   select reloid,last_checktime,row_number() over(partition by reloid order by last_checktime desc) rn"
+        "   from check_ao_state"
+        " ) aost"
+        " on op.objid=aost.reloid"
+        " where op.actionname='ANALYZE' and aost.rn=1 and op.statime>=aost.last_checktime;"
+        ""
+        " select 'analyze '||schemaname||'.'||tablename||';' from"
+        " ("
+        "   select a.reloid,a.schemaname,a.tablename"
+        "   from check_ao_state a,analyze_target_list_{currdatetime} b"
+        "   where a.reloid=b.reloid and a.modcount<>b.modcount"
+        "   union all"
+        "   select b.reloid,b.schemaname,b.tablename"
+        "   from analyze_target_list_{currdatetime} b"
+        "   where b.reloid not in (select reloid from check_ao_state)"
+        " ) t1"
+        " where t1.reloid not in (select reloid from ao_analyze_stat_temp);".format(
+            currdatetime=currdatetime, tmp_schemastr=tmp_schemastr
+        )
     )
-    print(f'psql -A -X -t -q -c "{sql}" ')
+    print('psql -A -X -t -q -c "{}" '.format(sql))
     ret, output = run_psql_stderr_suppressed(sql, quiet=True)
     if ret:
-        print(f"Get AO table list error ={sql}=")
+        print("Get AO table list error ={}=".format(sql))
         return -1, []
     target_tablelist.extend(output.splitlines())
 
     return 0, target_tablelist
 
 
-def run_after_analyze(curr_schema: str, currdatetime: str) -> int:
+def run_after_analyze(curr_schema, currdatetime):
     tmp_schemastr = curr_schema.replace("'", "''")
-    print(f"tmp_schemastr[{tmp_schemastr}]")
+    print("tmp_schemastr[{}]".format(tmp_schemastr))
 
     sql = (
-        f" delete from check_ao_state a"
-        f" using analyze_target_list_{currdatetime} b where a.reloid=b.reloid;"
-        f" delete from check_ao_state a"
-        f" where reloid not in (select oid from pg_class);"
-        f""
-        f" insert into check_ao_state"
-        f" select reloid,schemaname,tablename,modcount,current_timestamp from analyze_target_list_{currdatetime} a;"
-        f""
-        f" drop table if exists analyze_target_list_{currdatetime};"
+        " delete from check_ao_state a"
+        " using analyze_target_list_{currdatetime} b where a.reloid=b.reloid;"
+        " delete from check_ao_state a"
+        " where reloid not in (select oid from pg_class);"
+        ""
+        " insert into check_ao_state"
+        " select reloid,schemaname,tablename,modcount,current_timestamp from analyze_target_list_{currdatetime} a;"
+        ""
+        " drop table if exists analyze_target_list_{currdatetime};".format(
+            currdatetime=currdatetime
+        )
     )
-    print(f'psql -A -X -t -c "{sql}" ')
+    print('psql -A -X -t -c "{}" '.format(sql))
     ret, _ = run_psql(sql)
     if ret:
-        print(f"psql refresh AO table state error ={sql}=")
+        print("psql refresh AO table state error ={}=".format(sql))
         return -1
 
     sql = " vacuum analyze check_ao_state; "
@@ -197,23 +199,27 @@ def run_after_analyze(curr_schema: str, currdatetime: str) -> int:
     return 0
 
 
-def analyze_worker(sql: str) -> None:
+def analyze_worker(sql):
     """Child process: run a single ANALYZE command via psql."""
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    if result.returncode:
-        print(f"Analyze error: {sql}\n{result.stdout}{result.stderr}")
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
+        print("Analyze error: {}\n{}{}".format(sql, out, err))
 
 
-def main() -> int:
+def main():
     if len(sys.argv) != 4:
         print(
-            f"Argument number Error\nExample:\n"
-            f"python3 {sys.argv[0]} dbname schemaname concurrency\n"
-            f"If schemaname=ALL, all schema will be analyzed!"
+            "Argument number Error\nExample:\n"
+            "python {} dbname schemaname concurrency\n"
+            "If schemaname=ALL, all schema will be analyzed!".format(sys.argv[0])
         )
         sys.exit(1)
 
@@ -221,9 +227,13 @@ def main() -> int:
     inputschema = sys.argv[2]
     concurrency = int(sys.argv[3])
 
-    username = subprocess.run(
-        ["whoami"], capture_output=True, text=True
-    ).stdout.strip()
+    proc = subprocess.Popen(
+        ["whoami"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    out, _ = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    username = out.strip()
 
     currdatetime = get_curr_datetime()
 
@@ -237,14 +247,14 @@ def main() -> int:
         return -1
 
     itotal = len(target_tablelist)
-    print(f"Total count [{itotal}]")
+    print("Total count [{}]".format(itotal))
 
     num_finish = 0
-    active_procs: list[Process] = []
+    active_procs = []
 
     for icalc in range(itotal):
         sql = target_tablelist[icalc].strip()
-        print(f"[SQL]=[{sql}]")
+        print("[SQL]=[{}]".format(sql))
 
         proc = Process(target=analyze_worker, args=(sql,))
         proc.start()
@@ -252,14 +262,14 @@ def main() -> int:
 
         if num_finish % 10 == 0:
             print(
-                f"Child process count [{len(active_procs)}], "
-                f"finish count[{num_finish}/{itotal}]"
+                "Child process count [{}], "
+                "finish count[{}/{}]".format(len(active_procs), num_finish, itotal)
             )
 
         # Wait until active processes < concurrency
         while len(active_procs) >= concurrency:
             time.sleep(1)
-            still_active: list[Process] = []
+            still_active = []
             for p in active_procs:
                 if p.is_alive():
                     still_active.append(p)

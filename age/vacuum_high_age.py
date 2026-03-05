@@ -1,9 +1,11 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """GPDB vacuum high age table.
 
-Command line: python3 vacuum_high_age.py dbname duration(hours) log_dir
-Sample: python3 vacuum_high_age.py gsdc 2 /home/gpadmin/gpAdminLogs/
+Command line: python vacuum_high_age.py dbname duration(hours) log_dir
+Sample: python vacuum_high_age.py gsdc 2 /home/gpadmin/gpAdminLogs/
 """
+
+from __future__ import print_function
 
 import os
 import subprocess
@@ -11,7 +13,6 @@ import sys
 import time
 from datetime import datetime
 from multiprocessing import Process, Value
-from typing import IO
 
 HOSTNAME = "localhost"
 PORT = "5432"
@@ -20,74 +21,82 @@ PASSWORD = ""
 CONCURRENCY = 3
 AGE_LEVEL = "300000000"
 
-fh_log: IO[str] | None = None
+fh_log = None
 
 
-def set_env(database: str) -> int:
+def set_env(database):
     os.environ["PGHOST"] = HOSTNAME
     os.environ["PGPORT"] = PORT
     os.environ["PGDATABASE"] = database
     os.environ["PGUSER"] = USERNAME
     os.environ["PGPASSWORD"] = PASSWORD
 
-    subprocess.run(
+    proc = subprocess.Popen(
         "source /usr/local/greenplum-db/greenplum_path.sh",
         shell=True,
         executable="/bin/bash",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
+    proc.communicate()
     return 0
 
 
-def get_current_datetime() -> str:
+def get_current_datetime():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def get_current_date() -> str:
+def get_current_date():
     return datetime.now().strftime("%Y%m%d")
 
 
-def show_time() -> str:
+def show_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def run_psql(sql: str) -> tuple[int, str]:
+def run_psql(sql):
     """Run psql command and return (returncode, output)."""
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    return result.returncode, result.stdout
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    return proc.returncode, out
 
 
-def get_tablelist() -> tuple[int, list[str]]:
+def get_tablelist():
     global fh_log
-    target_tablelist: list[str] = []
+    target_tablelist = []
 
     # Prepare high age tableinfo
-    sql = f"""
+    sql = """
     drop table if exists tmp_class_age;
     create table tmp_class_age as
     select oid as reloid,relname,age(relfrozenxid)::bigint as age_int,gp_segment_id as segid from gp_dist_random('pg_class')
-    where relkind='r' and relstorage!='x' and age(relfrozenxid)>{AGE_LEVEL} and relhassubclass=true
+    where relkind='r' and relstorage!='x' and age(relfrozenxid)>{age_level} and relhassubclass=true
     distributed randomly;
 
     insert into tmp_class_age
     select oid as reloid,relname,age(relfrozenxid)::bigint as age_int,gp_segment_id from pg_class
-    where relkind='r' and relstorage!='x' and age(relfrozenxid)>{AGE_LEVEL} and relhassubclass=true;
+    where relkind='r' and relstorage!='x' and age(relfrozenxid)>{age_level} and relhassubclass=true;
 
     insert into tmp_class_age
     select oid as reloid,relname,age(relfrozenxid)::bigint as age_int,gp_segment_id as segid from gp_dist_random('pg_class')
-    where relkind='r' and relstorage!='x' and age(relfrozenxid)>{AGE_LEVEL} and relhassubclass=false and relname not like '%_1_prt_%';
+    where relkind='r' and relstorage!='x' and age(relfrozenxid)>{age_level} and relhassubclass=false and relname not like '%_1_prt_%';
 
     insert into tmp_class_age
     select oid as reloid,relname,age(relfrozenxid)::bigint as age_int,gp_segment_id from pg_class
-    where relkind='r' and relstorage!='x' and age(relfrozenxid)>{AGE_LEVEL} and relhassubclass=false and relname not like '%_1_prt_%';
-    """
-    fh_log.write(f"[INFO]psql -A -X -t -c [{sql}]\n")
+    where relkind='r' and relstorage!='x' and age(relfrozenxid)>{age_level} and relhassubclass=false and relname not like '%_1_prt_%';
+    """.format(age_level=AGE_LEVEL)
+    fh_log.write("[INFO]psql -A -X -t -c [{}]\n".format(sql))
     ret, _ = run_psql(sql)
     if ret:
-        fh_log.write(f"[ERROR]Get partition tablelist error [{sql}]\n")
+        fh_log.write("[ERROR]Get partition tablelist error [{}]\n".format(sql))
         return -1, []
 
     # Get high age table list
@@ -98,29 +107,29 @@ def get_tablelist() -> tuple[int, list[str]]:
     inner join pg_namespace c on b.relnamespace=c.oid
     order by age_int desc limit 8000
     """
-    fh_log.write(f"[INFO]psql -A -X -t -c [{sql}]\n")
+    fh_log.write("[INFO]psql -A -X -t -c [{}]\n".format(sql))
     ret, output = run_psql(sql)
     if ret:
-        fh_log.write(f"[ERROR]Get partition tablelist error [{sql}]\n")
+        fh_log.write("[ERROR]Get partition tablelist error [{}]\n".format(sql))
         return -1, []
     target_tablelist.extend(output.splitlines())
 
     # Prepare high age tableinfo (partitions)
-    sql = f"""
+    sql = """
     drop table if exists tmp_class_age;
     create table tmp_class_age as
     select oid as reloid,relname,age(relfrozenxid)::bigint as age_int,gp_segment_id as segid from gp_dist_random('pg_class')
-    where relkind='r' and relstorage!='x' and age(relfrozenxid)>{AGE_LEVEL} and relhassubclass=false and relname like '%_1_prt_%'
+    where relkind='r' and relstorage!='x' and age(relfrozenxid)>{age_level} and relhassubclass=false and relname like '%_1_prt_%'
     distributed randomly;
 
     insert into tmp_class_age
     select oid as reloid,relname,age(relfrozenxid)::bigint as age_int,gp_segment_id from pg_class
-    where relkind='r' and relstorage!='x' and age(relfrozenxid)>{AGE_LEVEL} and relhassubclass=false and relname like '%_1_prt_%';
-    """
-    fh_log.write(f"[INFO]psql -A -X -t -c [{sql}]\n")
+    where relkind='r' and relstorage!='x' and age(relfrozenxid)>{age_level} and relhassubclass=false and relname like '%_1_prt_%';
+    """.format(age_level=AGE_LEVEL)
+    fh_log.write("[INFO]psql -A -X -t -c [{}]\n".format(sql))
     ret, _ = run_psql(sql)
     if ret:
-        fh_log.write(f"[ERROR]Get partition tablelist error [{sql}]\n")
+        fh_log.write("[ERROR]Get partition tablelist error [{}]\n".format(sql))
         return -1, []
 
     # Get high age table list
@@ -131,35 +140,40 @@ def get_tablelist() -> tuple[int, list[str]]:
     inner join pg_namespace c on b.relnamespace=c.oid
     order by age_int desc limit 8000
     """
-    fh_log.write(f"[INFO]psql -A -X -t -c [{sql}]\n")
+    fh_log.write("[INFO]psql -A -X -t -c [{}]\n".format(sql))
     ret, output = run_psql(sql)
     if ret:
-        fh_log.write(f"[ERROR]Get partition tablelist error [{sql}]\n")
+        fh_log.write("[ERROR]Get partition tablelist error [{}]\n".format(sql))
         return -1, []
     target_tablelist.extend(output.splitlines())
 
     return 0, target_tablelist
 
 
-def vacuum_worker(sql: str) -> None:
+def vacuum_worker(sql):
     """Child process: run a single VACUUM FREEZE command via psql."""
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
         # Write to stdout since log file handle is not shared across processes
-        print(f"[ERROR]VACUUM error: [{sql}]\nerrmsg: [{result.stdout}]")
+        print("[ERROR]VACUUM error: [{}]\nerrmsg: [{}]".format(sql, out))
 
 
-def main() -> int:
+def main():
     global fh_log
 
     if len(sys.argv) != 4:
         print(
-            f"Argument number Error\nExample:\n"
-            f"python3 {sys.argv[0]} dbname duration(hours) log_dir"
+            "Argument number Error\nExample:\n"
+            "python {} dbname duration(hours) log_dir".format(sys.argv[0])
         )
         sys.exit(1)
 
@@ -170,39 +184,39 @@ def main() -> int:
     set_env(database)
 
     logday = get_current_date()
-    log_path = os.path.join(log_dir, f"vacuum_high_age_{logday}.log")
+    log_path = os.path.join(log_dir, "vacuum_high_age_{}.log".format(logday))
     try:
         fh_log = open(log_path, "a")
     except OSError:
-        print(f"[ERROR]:Could not open logfile {log_path}")
+        print("[ERROR]:Could not open logfile {}".format(log_path))
         sys.exit(1)
 
-    fh_log.write(f"[INFO]:Start time:{show_time()}\n")
+    fh_log.write("[INFO]:Start time:{}\n".format(show_time()))
     starttime = time.time()
 
     ret, target_tablelist = get_tablelist()
     if ret:
         fh_log.write("[ERROR]Get high age table list error!\n")
-        fh_log.write(f"[INFO]:Finish time:{show_time()}\n")
+        fh_log.write("[INFO]:Finish time:{}\n".format(show_time()))
         fh_log.close()
         return -1
 
     itotal = len(target_tablelist)
-    fh_log.write(f"[INFO]Total count [{itotal}]\n")
+    fh_log.write("[INFO]Total count [{}]\n".format(itotal))
 
     num_finish = 0
-    active_procs: list[Process] = []
+    active_procs = []
 
     for icalc in range(itotal):
         nowtime = time.time()
         t_interval = nowtime - starttime
-        fh_log.write(f"[INFO]t_interval:[{t_interval}]\n")
+        fh_log.write("[INFO]t_interval:[{}]\n".format(t_interval))
         if t_interval > duration * 3600:
             fh_log.write("[INFO]Time is up\n")
             break
 
         sql = target_tablelist[icalc].strip()
-        fh_log.write(f"[INFO][SQL]=[{sql}]\n")
+        fh_log.write("[INFO][SQL]=[{}]\n".format(sql))
         fh_log.flush()
 
         proc = Process(target=vacuum_worker, args=(sql,))
@@ -211,14 +225,14 @@ def main() -> int:
 
         if num_finish % 10 == 0:
             print(
-                f"Child process count [{len(active_procs)}], "
-                f"finish count[{num_finish}/{itotal}]"
+                "Child process count [{}], "
+                "finish count[{}/{}]".format(len(active_procs), num_finish, itotal)
             )
 
         # Wait until active processes < concurrency
         while len(active_procs) >= CONCURRENCY:
             time.sleep(1)
-            still_active: list[Process] = []
+            still_active = []
             for p in active_procs:
                 if p.is_alive():
                     still_active.append(p)
@@ -231,14 +245,14 @@ def main() -> int:
     if active_procs:
         unfinish = len(active_procs)
         fh_log.write(
-            f"[INFO]:Waiting for {unfinish} unfinished child processes\n"
+            "[INFO]:Waiting for {} unfinished child processes\n".format(unfinish)
         )
 
     for p in active_procs:
         p.join()
         num_finish += 1
 
-    fh_log.write(f"[INFO]:Finish time:{show_time()}\n")
+    fh_log.write("[INFO]:Finish time:{}\n".format(show_time()))
     fh_log.close()
     return 0
 

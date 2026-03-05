@@ -1,7 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+from __future__ import print_function
 """GPDB analyze root partition tables.
 
-Command line: python3 analyze_root.py dbname schema concurrency
+Command line: python analyze_root.py dbname schema concurrency
 """
 
 import os
@@ -9,6 +10,8 @@ import subprocess
 import sys
 import time
 from multiprocessing import Process
+
+_DEVNULL = open(os.devnull, 'w')
 
 EXCLUDE_SCHEMA = """
  'gp_toolkit'
@@ -33,7 +36,7 @@ EXCLUDE_SCHEMA = """
 """
 
 
-def set_env(database: str, username: str) -> int:
+def set_env(database, username):
     os.environ["PGHOST"] = "localhost"
     os.environ["PGDATABASE"] = database
     os.environ["PGUSER"] = username
@@ -41,57 +44,60 @@ def set_env(database: str, username: str) -> int:
     return 0
 
 
-def run_psql(sql: str) -> tuple[int, str]:
+def run_psql(sql):
     """Run psql command and return (returncode, output)."""
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    return result.returncode, result.stdout
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    return proc.returncode, out
 
 
-def run_psql_stderr_suppressed(sql: str) -> tuple[int, str]:
+def run_psql_stderr_suppressed(sql):
     """Run psql with stderr suppressed."""
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
+        stdout=subprocess.PIPE, stderr=_DEVNULL,
     )
-    return result.returncode, result.stdout
+    out, _ = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    return proc.returncode, out
 
 
-def get_schema(inputschema: str) -> str:
+def get_schema(inputschema):
     if inputschema == "ALL":
         sql = (
-            f" select string_agg(''''||nspname||'''',',' ) from pg_namespace"
-            f" where nspname not like 'pg%' and nspname not like 'gp%' and"
-            f" nspname not in ({EXCLUDE_SCHEMA}); "
+            " select string_agg(''''||nspname||'''',',' ) from pg_namespace"
+            " where nspname not like 'pg%' and nspname not like 'gp%' and"
+            " nspname not in ({});".format(EXCLUDE_SCHEMA)
         )
         ret, tmpsss = run_psql_stderr_suppressed(sql)
         if ret >> 8 if ret > 255 else ret:
             print("psql get all schema error")
             sys.exit(1)
         tmpsss = tmpsss.strip()
-        curr_schema = f"({tmpsss})"
+        curr_schema = "({})".format(tmpsss)
     else:
         tmpsss = inputschema.replace(",", "','")
-        curr_schema = f"('{tmpsss}')"
+        curr_schema = "('{}')".format(tmpsss)
 
-    print(f"analyze schema [{curr_schema}]")
+    print("analyze schema [{}]".format(curr_schema))
     return curr_schema
 
 
-def get_tablelist(curr_schema: str) -> tuple[int, list[str]]:
+def get_tablelist(curr_schema):
     # root partition
     sql = (
-        f" select 'analyze rootpartition '||aa.nspname||'.'||bb.relname||';'"
-        f" from pg_namespace aa,pg_class bb"
-        f" where aa.oid=bb.relnamespace and aa.nspname in {curr_schema}"
-        f" and bb.relkind='r' and bb.relstorage!='x' and bb.relhassubclass=true; "
+        " select 'analyze rootpartition '||aa.nspname||'.'||bb.relname||';'"
+        " from pg_namespace aa,pg_class bb"
+        " where aa.oid=bb.relnamespace and aa.nspname in {}"
+        " and bb.relkind='r' and bb.relstorage!='x' and bb.relhassubclass=true; ".format(curr_schema)
     )
-    print(f'psql -A -X -t -c "{sql}" ')
+    print('psql -A -X -t -c "{}" '.format(sql))
     ret, output = run_psql(sql)
     if ret >> 8 if ret > 255 else ret:
         print("Get rootpartition error ")
@@ -100,22 +106,26 @@ def get_tablelist(curr_schema: str) -> tuple[int, list[str]]:
     return 0, output.splitlines()
 
 
-def analyze_worker(sql: str) -> None:
+def analyze_worker(sql):
     """Child process: run a single ANALYZE command via psql."""
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    if result.returncode:
-        print(f"Analyze error: {result.stdout}{result.stderr}")
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
+        print("Analyze error: {}{}".format(out, err))
 
 
-def main() -> int:
+def main():
     if len(sys.argv) != 4:
         print(
-            f"Argument number Error\nExample:\n"
-            f"python3 {sys.argv[0]} dbname schema concurrency"
+            "Argument number Error\nExample:\n"
+            "python {} dbname schema concurrency".format(sys.argv[0])
         )
         sys.exit(1)
 
@@ -123,9 +133,13 @@ def main() -> int:
     inputschema = sys.argv[2]
     concurrency = int(sys.argv[3])
 
-    username = subprocess.run(
-        ["whoami"], capture_output=True, text=True
-    ).stdout.strip()
+    proc = subprocess.Popen(
+        ["whoami"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    out, _ = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    username = out.strip()
 
     set_env(database, username)
 
@@ -138,14 +152,14 @@ def main() -> int:
         return -1
 
     itotal = len(target_tablelist)
-    print(f"Total count [{itotal}]")
+    print("Total count [{}]".format(itotal))
 
     num_finish = 0
-    active_procs: list[Process] = []
+    active_procs = []
 
     for icalc in range(itotal):
         sql = target_tablelist[icalc].strip()
-        print(f"[SQL]=[{sql}]")
+        print("[SQL]=[{}]".format(sql))
 
         proc = Process(target=analyze_worker, args=(sql,))
         proc.start()
@@ -153,14 +167,14 @@ def main() -> int:
 
         if num_finish % 10 == 0:
             print(
-                f"Child process count [{len(active_procs)}], "
-                f"finish count[{num_finish}/{itotal}]"
+                "Child process count [{}], "
+                "finish count[{}/{}]".format(len(active_procs), num_finish, itotal)
             )
 
         # Wait until active processes < concurrency
         while len(active_procs) >= concurrency:
             time.sleep(1)
-            still_active: list[Process] = []
+            still_active = []
             for p in active_procs:
                 if p.is_alive():
                     still_active.append(p)

@@ -1,5 +1,6 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Greenplum vacuum script: bloat check and parallel vacuum with process deduplication."""
+from __future__ import print_function
 
 import argparse
 import os
@@ -8,29 +9,34 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from io import TextIOWrapper
-from typing import Optional
 
 # Globals
-hostname: str = "localhost"
-port: str = "5432"
-database: str = "postgres"
-username: str = "gpadmin"
-password: str = "gpadmin"
+hostname = "localhost"
+port = "5432"
+database = "postgres"
+username = "gpadmin"
+password = "gpadmin"
 
-schema_list: list[str] = []
-schema_str: str = ""
-concurrency: int = 2
+schema_list = []
+schema_str = ""
+concurrency = 2
 
-fh_log: Optional[TextIOWrapper] = None
-cmd_name: str = ""
+fh_log = None
+cmd_name = ""
 
-num_proc: int = 0
-num_finish: int = 0
-mainpid: int = os.getpid()
+num_proc = 0
+num_finish = 0
+mainpid = os.getpid()
 
 
-def handler(signum: int, frame: object) -> None:
+class _CmdResult(object):
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def handler(signum, frame):
     """Handle SIGCHLD: reap finished child processes."""
     global num_proc, num_finish
 
@@ -52,64 +58,68 @@ def handler(signum: int, frame: object) -> None:
 signal.signal(signal.SIGCHLD, handler)
 
 
-def get_cmd_name(inname: str) -> str:
+def get_cmd_name(inname):
     """Extract the basename from a full path."""
     return os.path.basename(inname)
 
 
-def get_current_date() -> str:
+def get_current_date():
     """Return current date as YYYYMMDD string."""
     return datetime.now().strftime("%Y%m%d")
 
 
-def show_time() -> str:
+def show_time():
     """Return current timestamp as YYYY-MM-DD HH:MM:SS string."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def init_log() -> None:
+def init_log():
     """Open the log file for appending."""
     global fh_log
     logday = get_current_date()
     log_dir = os.path.expanduser("~/gpAdminLogs")
-    log_path = os.path.join(log_dir, f"{cmd_name}_{logday}.log")
+    log_path = os.path.join(log_dir, "{0}_{1}.log".format(cmd_name, logday))
     try:
-        os.makedirs(log_dir, exist_ok=True)
+        try:
+            os.makedirs(log_dir)
+        except OSError:
+            if not os.path.isdir(log_dir):
+                raise
         fh_log = open(log_path, "a")
     except OSError:
-        print(f"[ERROR]:Could not open logfile {log_path}")
+        print("[ERROR]:Could not open logfile {0}".format(log_path))
         sys.exit(-1)
 
 
-def info(printmsg: str) -> int:
+def info(printmsg):
     """Write an INFO message to the log file."""
     if fh_log is not None:
-        fh_log.write(f"[{show_time()} INFO] {printmsg}")
+        fh_log.write("[{0} INFO] {1}".format(show_time(), printmsg))
     return 0
 
 
-def info_notimestr(printmsg: str) -> int:
+def info_notimestr(printmsg):
     """Write a message to the log file without timestamp prefix."""
     if fh_log is not None:
         fh_log.write(printmsg)
     return 0
 
 
-def error(printmsg: str) -> int:
+def error(printmsg):
     """Write an ERROR message to the log file."""
     if fh_log is not None:
-        fh_log.write(f"[{show_time()} ERROR] {printmsg}")
+        fh_log.write("[{0} ERROR] {1}".format(show_time(), printmsg))
     return 0
 
 
-def close_log() -> int:
+def close_log():
     """Close the log file."""
     if fh_log is not None:
         fh_log.close()
     return 0
 
 
-def set_env() -> int:
+def set_env():
     """Set PostgreSQL environment variables."""
     os.environ["PGHOST"] = hostname
     os.environ["PGPORT"] = port
@@ -119,34 +129,49 @@ def set_env() -> int:
     return 0
 
 
-def run_psql(sql: str, stderr_devnull: bool = False) -> subprocess.CompletedProcess[str]:
+def run_psql(sql, stderr_devnull=False):
     """Run a psql command with standard connection parameters."""
     cmd = ["psql", "-A", "-X", "-t", "-c", sql,
            "-h", hostname, "-p", port, "-U", username, "-d", database]
-    stderr_target = subprocess.DEVNULL if stderr_devnull else subprocess.PIPE
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=stderr_target,
-                          text=True, check=False)
+    if stderr_devnull:
+        devnull = open(os.devnull, 'w')
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=devnull)
+    else:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if stderr_devnull:
+        devnull.close()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if err and hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    return _CmdResult(proc.returncode, out, err or '')
 
 
-def check_process() -> int:
+def check_process():
     """Check if another instance of this script is running."""
-    result = subprocess.run(
-        f"ps -ef | grep {cmd_name} | grep -v grep | grep -v '.log' | wc -l",
-        shell=True, capture_output=True, text=True, check=False,
+    proc = subprocess.Popen(
+        "ps -ef | grep {0} | grep -v grep | grep -v '.log' | wc -l".format(cmd_name),
+        shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    if result.returncode != 0:
-        error(f"Check {cmd_name} process error\n")
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode != 0:
+        error("Check {0} process error\n".format(cmd_name))
         return -1
-    return int(result.stdout.strip())
+    return int(out.strip())
 
 
 def get_schema(
-    is_all: bool,
-    chk_schema: list[str],
-    schema_file: str,
-    exclude_schema: list[str],
-    exclude_schema_file: str,
-) -> None:
+    is_all,
+    chk_schema,
+    schema_file,
+    exclude_schema,
+    exclude_schema_file,
+):
     """Populate schema_list and schema_str based on CLI options."""
     global schema_list, schema_str
 
@@ -166,7 +191,7 @@ def get_schema(
     # --include-schema-file
     if schema_file:
         if not os.path.exists(schema_file):
-            error(f"Schema file {schema_file} do not exist!\n")
+            error("Schema file {0} do not exist!\n".format(schema_file))
             sys.exit(1)
         try:
             with open(schema_file, "r") as f:
@@ -175,15 +200,15 @@ def get_schema(
                     if line and not line.startswith("#"):
                         schema_list.append(line)
         except OSError as e:
-            print(f"{show_time()} open {schema_file} error: {e}")
+            print("{0} open {1} error: {2}".format(show_time(), schema_file, e))
             sys.exit(1)
 
     # --exclude-schema
     if exclude_schema:
-        ex_str = "(" + ",".join(f"'{s}'" for s in exclude_schema) + ")"
-        print(f"Exclude SCHEMA: {ex_str}")
-        sql = (f"select nspname from pg_namespace where nspname not like 'pg%' "
-               f"and nspname not like 'gp%' and nspname not in {ex_str} order by 1;")
+        ex_str = "(" + ",".join("'{0}'".format(s) for s in exclude_schema) + ")"
+        print("Exclude SCHEMA: {0}".format(ex_str))
+        sql = ("select nspname from pg_namespace where nspname not like 'pg%' "
+               "and nspname not like 'gp%' and nspname not in {0} order by 1;".format(ex_str))
         result = run_psql(sql)
         if result.returncode != 0:
             error("Query schema name exclude error\n")
@@ -193,9 +218,9 @@ def get_schema(
     # --exclude-schema-file
     if exclude_schema_file:
         if not os.path.exists(exclude_schema_file):
-            error(f"Schema file {exclude_schema_file} do not exist!\n")
+            error("Schema file {0} do not exist!\n".format(exclude_schema_file))
             sys.exit(1)
-        exclude_list: list[str] = []
+        exclude_list = []
         try:
             with open(exclude_schema_file, "r") as f:
                 for line in f:
@@ -203,13 +228,13 @@ def get_schema(
                     if line and not line.startswith("#"):
                         exclude_list.append(line)
         except OSError as e:
-            print(f"{show_time()} open {exclude_schema_file} error: {e}")
+            print("{0} open {1} error: {2}".format(show_time(), exclude_schema_file, e))
             sys.exit(1)
 
-        ex_str = "(" + ",".join(f"'{s}'" for s in exclude_list) + ")"
-        print(f"Exclude SCHEMA: {ex_str}")
-        sql = (f"select nspname from pg_namespace where nspname not like 'pg%' "
-               f"and nspname not like 'gp%' and nspname not in {ex_str} order by 1;")
+        ex_str = "(" + ",".join("'{0}'".format(s) for s in exclude_list) + ")"
+        print("Exclude SCHEMA: {0}".format(ex_str))
+        sql = ("select nspname from pg_namespace where nspname not like 'pg%' "
+               "and nspname not like 'gp%' and nspname not in {0} order by 1;".format(ex_str))
         result = run_psql(sql)
         if result.returncode != 0:
             error("Query schema name exclude file error\n")
@@ -217,15 +242,15 @@ def get_schema(
         schema_list = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
 
     # Build schema_str
-    schema_str = "(" + ",".join(f"'{s}'" for s in schema_list) + ")"
-    print(f"SCHEMA: {schema_str}")
+    schema_str = "(" + ",".join("'{0}'".format(s) for s in schema_list) + ")"
+    print("SCHEMA: {0}".format(schema_str))
 
 
-def bloatcheck() -> int:
+def bloatcheck():
     """Perform bloat check on heap and AO tables."""
     global num_proc, num_finish
 
-    print(f"---Start bloat check, jobs [{concurrency}]")
+    print("---Start bloat check, jobs [{0}]".format(concurrency))
 
     # Create result table
     sql = """drop table if exists bloat_skew_result;
@@ -241,7 +266,7 @@ def bloatcheck() -> int:
 
     # Heap table bloat check
     info("---Start heap table bloat check...\n")
-    sql = f"""drop table if exists pg_stats_bloat_chk;
+    sql = """drop table if exists pg_stats_bloat_chk;
              create temp table pg_stats_bloat_chk
              (
                schemaname varchar(30),
@@ -349,7 +374,7 @@ def bloatcheck() -> int:
                    JOIN pg_namespace_bloat_chk nn ON cc.relnamespace = nn.oid_ss AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema'
                ) AS sml
                WHERE sml.relpages - live_size_blocks > 2
-             ) AS blochk where wastedsize>1073741824 and bloat>2;"""
+             ) AS blochk where wastedsize>1073741824 and bloat>2;""".format(schema_str=schema_str)
 
     result = run_psql(sql, stderr_devnull=True)
     if result.returncode != 0:
@@ -371,22 +396,28 @@ def bloatcheck() -> int:
         if pid == 0:
             # Child process
             schema = schema_list[icalc]
-            sql = (f"copy (select schemaname||'.'||tablename,'ao',bloat "
-                   f"from AOtable_bloatcheck('{schema}') where bloat>1.9) "
-                   f"to '/tmp/tmpaobloat.{schema}.dat';")
-            res = subprocess.run(
+            sql = ("copy (select schemaname||'.'||tablename,'ao',bloat "
+                   "from AOtable_bloatcheck('{0}') where bloat>1.9) "
+                   "to '/tmp/tmpaobloat.{0}.dat';".format(schema))
+            proc = subprocess.Popen(
                 ["psql", "-A", "-X", "-t", "-c", sql,
                  "-h", hostname, "-p", port, "-U", username, "-d", database],
-                capture_output=True, text=True, check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
+            out, err = proc.communicate()
+            if hasattr(out, 'decode'):
+                out = out.decode('utf-8', 'replace')
+            if hasattr(err, 'decode'):
+                err = err.decode('utf-8', 'replace')
+            res = _CmdResult(proc.returncode, out, err or '')
             if res.returncode != 0:
-                error(f"Unload {schema} AO table error! \n{res.stderr}\n")
+                error("Unload {0} AO table error! \n{1}\n".format(schema, res.stderr))
                 os._exit(255)
 
-            sql = f"copy bloat_skew_result from '/tmp/tmpaobloat.{schema}.dat';"
+            sql = "copy bloat_skew_result from '/tmp/tmpaobloat.{0}.dat';".format(schema)
             res = run_psql(sql, stderr_devnull=True)
             if res.returncode != 0:
-                error(f"Load {schema} AO bloat into bloat_skew_result error! \n")
+                error("Load {0} AO bloat into bloat_skew_result error! \n".format(schema))
                 os._exit(255)
 
             os._exit(0)
@@ -394,35 +425,41 @@ def bloatcheck() -> int:
         else:
             # Parent process
             num_proc += 1
-            print(f"Child process count [{num_proc}], finish count[{num_finish}/{itotal}]")
+            print("Child process count [{0}], finish count[{1}/{2}]".format(num_proc, num_finish, itotal))
             while num_proc >= concurrency:
                 time.sleep(1)
 
     # Wait for all children
     while num_proc > 0:
         time.sleep(1)
-    print(f"Child process count [{num_proc}], finish count[{num_finish}/{itotal}]")
+    print("Child process count [{0}], finish count[{1}/{2}]".format(num_proc, num_finish, itotal))
 
     # Query results
     sql = "select * from bloat_skew_result order by relstorage,bloat desc;"
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-X", "-c", sql,
          "-h", hostname, "-p", port, "-U", username, "-d", database],
-        capture_output=True, text=True, check=False,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    result = _CmdResult(proc.returncode, out, err or '')
     if result.returncode != 0:
         error("Query bloat check result error! \n")
         return -1
     info("---Bloat check result\n")
-    info_notimestr(f"\n{result.stdout}\n")
+    info_notimestr("\n{0}\n".format(result.stdout))
     return 0
 
 
-def parallel_vacuum() -> int:
+def parallel_vacuum():
     """Run vacuum and analyze on bloated tables in parallel."""
     global num_proc, num_finish
 
-    print(f"---Start vacuum, jobs [{concurrency}]")
+    print("---Start vacuum, jobs [{0}]".format(concurrency))
     sql = "select tablename from bloat_skew_result order by bloat desc;"
     result = run_psql(sql)
     if result.returncode != 0:
@@ -443,44 +480,44 @@ def parallel_vacuum() -> int:
         if pid == 0:
             # Child process
             table = vacuumlist[icalc]
-            sql = f"vacuum {table}; analyze {table};"
-            info(f" [{sql}]\n")
+            sql = "vacuum {0}; analyze {0};".format(table)
+            info(" [{0}]\n".format(sql))
             res = run_psql(sql, stderr_devnull=True)
             if res.returncode != 0:
-                error(f"vacuum {table} error! \n")
+                error("vacuum {0} error! \n".format(table))
                 os._exit(255)
             os._exit(0)
 
         else:
             # Parent process
             num_proc += 1
-            print(f"Child process count [{num_proc}], finish count[{num_finish}/{itotal}]")
+            print("Child process count [{0}], finish count[{1}/{2}]".format(num_proc, num_finish, itotal))
             while num_proc >= concurrency:
                 time.sleep(1)
 
     # Wait for all children
     while num_proc > 0:
         time.sleep(1)
-    print(f"Child process count [{num_proc}], finish count[{num_finish}/{itotal}]")
+    print("Child process count [{0}], finish count[{1}/{2}]".format(num_proc, num_finish, itotal))
     return 0
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
     """Parse command line arguments."""
     global cmd_name
     cmd_name = get_cmd_name(sys.argv[0])
 
     if len(sys.argv) == 1:
-        print(f"Input error: \nPlease show help: python3 {cmd_name} --help")
+        print("Input error: \nPlease show help: python3 {0} --help".format(cmd_name))
         sys.exit(0)
 
     parser = argparse.ArgumentParser(
         description="Greenplum vacuum script",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f"""Examples:
-  python3 {cmd_name} -d testdb -u gpadmin --include-schema public --include-schema gpp_sync --jobs 3
-  python3 {cmd_name} -d testdb -u gpadmin --exclude-schema public --exclude-schema dw --jobs 3
-""",
+        epilog="""Examples:
+  python3 {0} -d testdb -u gpadmin --include-schema public --include-schema gpp_sync --jobs 3
+  python3 {0} -d testdb -u gpadmin --exclude-schema public --exclude-schema dw --jobs 3
+""".format(cmd_name),
     )
     parser.add_argument("--hostname", "-H", default="localhost",
                         help="Master hostname or master host IP. Default: localhost")
@@ -529,7 +566,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def main() -> None:
+def main():
     """Main entry point."""
     global hostname, port, database, username, password, concurrency
 
@@ -550,8 +587,8 @@ def main() -> None:
 
     ret = check_process()
     if ret > 1:
-        info(f"There is another {cmd_name} process is running. \n")
-        print(f"There is another {cmd_name} process is running.")
+        info("There is another {0} process is running. \n".format(cmd_name))
+        print("There is another {0} process is running.".format(cmd_name))
     if ret == 1:
         get_schema(
             args.is_all,
