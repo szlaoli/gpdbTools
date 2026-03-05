@@ -1,63 +1,73 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+from __future__ import print_function
 import os
 import subprocess
 import sys
 from datetime import datetime
-from typing import IO, Optional
 
 
-RM_INTERVAL: int = 30
-GZIP_INTERVAL: int = 5
-fh_log: Optional[IO[str]] = None
-master_data_directory: str = ""
+RM_INTERVAL = 30
+GZIP_INTERVAL = 5
+fh_log = None
+master_data_directory = ""
 
 
-def get_current_date() -> str:
+def get_current_date():
     return datetime.now().strftime("%Y%m%d")
 
 
-def show_time() -> str:
+def show_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def init_log() -> None:
+def init_log():
     global fh_log
     logday = get_current_date()
     home = os.environ.get("HOME", "")
-    logpath = f"{home}/gpAdminLogs/clean_log_{logday}.log"
+    logpath = "{}/gpAdminLogs/clean_log_{}.log".format(home, logday)
     try:
         fh_log = open(logpath, "a")
     except OSError:
-        print(f"[ERROR]:Cound not open logfile {logpath}")
+        print("[ERROR]:Cound not open logfile {}".format(logpath))
         sys.exit(-1)
 
 
-def info(printmsg: str) -> int:
+def info(printmsg):
     if fh_log:
-        fh_log.write(f"[{show_time()} INFO] {printmsg}")
+        fh_log.write("[{} INFO] {}".format(show_time(), printmsg))
     return 0
 
 
-def error(printmsg: str) -> int:
+def error(printmsg):
     if fh_log:
-        fh_log.write(f"[{show_time()} ERROR] {printmsg}")
+        fh_log.write("[{} ERROR] {}".format(show_time(), printmsg))
     return 0
 
 
-def run_cmd(cmd: str) -> str:
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    return result.stdout
+def run_cmd(cmd):
+    proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    return out
 
 
-def gpenv() -> None:
+def gpenv():
     global master_data_directory
 
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["bash", "-c", "source ~/.bashrc; env"],
-        capture_output=True, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
-    config_params: dict[str, str] = {}
-    for line in result.stdout.splitlines():
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    config_params = {}
+    for line in out.splitlines():
         parts = line.split("=", 1)
         if len(parts) == 2:
             config_params[parts[0]] = parts[1]
@@ -74,76 +84,76 @@ def gpenv() -> None:
     master_data_directory = config_params.get("MASTER_DATA_DIRECTORY", "")
 
 
-def main() -> None:
+def main():
     gpenv()
     init_log()
 
     info("------gpAdminLogs rm list------\n")
     rmlist = run_cmd(
-        f'gpssh -f ~/allhosts "find /home/gpadmin/gpAdminLogs/ -mtime +{RM_INTERVAL} -name \'*.log*\' -exec ls -l {{}} \\;"'
+        'gpssh -f ~/allhosts "find /home/gpadmin/gpAdminLogs/ -mtime +{} -name \'*.log*\' -exec ls -l {{}} \\;"'.format(RM_INTERVAL)
     )
     info(rmlist)
     run_cmd(
-        f'gpssh -f ~/allhosts "find /home/gpadmin/gpAdminLogs/ -mtime +{RM_INTERVAL} -name \'*.log*\' -exec rm -f {{}} \\;"'
+        'gpssh -f ~/allhosts "find /home/gpadmin/gpAdminLogs/ -mtime +{} -name \'*.log*\' -exec rm -f {{}} \\;"'.format(RM_INTERVAL)
     )
 
     info("------gpAdminLogs gzip list------\n")
     gziplist = run_cmd(
-        f'gpssh -f ~/allhosts "find /home/gpadmin/gpAdminLogs/ -mtime +{GZIP_INTERVAL} -name \'*.log\' -exec ls -l {{}} \\;"'
+        'gpssh -f ~/allhosts "find /home/gpadmin/gpAdminLogs/ -mtime +{} -name \'*.log\' -exec ls -l {{}} \\;"'.format(GZIP_INTERVAL)
     )
     info(gziplist)
     run_cmd(
-        f'gpssh -f ~/allhosts "find /home/gpadmin/gpAdminLogs/ -mtime +{GZIP_INTERVAL} -name \'*.log\' -exec gzip -f {{}} \\;"'
+        'gpssh -f ~/allhosts "find /home/gpadmin/gpAdminLogs/ -mtime +{} -name \'*.log\' -exec gzip -f {{}} \\;"'.format(GZIP_INTERVAL)
     )
 
     info("------Master pg_log rm list------\n")
     rmlist = run_cmd(
-        f'gpssh -f ~/allmasters "find {master_data_directory}/pg_log -mtime +{RM_INTERVAL} -name \'*.csv*\' -exec ls -l {{}} \\;"'
+        'gpssh -f ~/allmasters "find {}/pg_log -mtime +{} -name \'*.csv*\' -exec ls -l {{}} \\;"'.format(master_data_directory, RM_INTERVAL)
     )
     info(rmlist)
     run_cmd(
-        f'gpssh -f ~/allmasters "find {master_data_directory}/pg_log -mtime +{RM_INTERVAL} -name \'*.csv*\' -exec rm -f {{}} \\;"'
+        'gpssh -f ~/allmasters "find {}/pg_log -mtime +{} -name \'*.csv*\' -exec rm -f {{}} \\;"'.format(master_data_directory, RM_INTERVAL)
     )
 
     info("------Master pg_log gzip list------\n")
     gziplist = run_cmd(
-        f'gpssh -f ~/allmasters "find {master_data_directory}/pg_log -mtime +{GZIP_INTERVAL} -name \'*.csv\' -exec ls -l {{}} \\;"'
+        'gpssh -f ~/allmasters "find {}/pg_log -mtime +{} -name \'*.csv\' -exec ls -l {{}} \\;"'.format(master_data_directory, GZIP_INTERVAL)
     )
     info(gziplist)
     run_cmd(
-        f'gpssh -f ~/allmasters "find {master_data_directory}/pg_log -mtime +{GZIP_INTERVAL} -name \'*.csv\' -exec gzip -f {{}} \\;"'
+        'gpssh -f ~/allmasters "find {}/pg_log -mtime +{} -name \'*.csv\' -exec gzip -f {{}} \\;"'.format(master_data_directory, GZIP_INTERVAL)
     )
 
     info("------Segment pg_log rm list------\n")
     rmlist = run_cmd(
-        f'gpssh -f ~/allsegs "find /data*/primary/gpseg*/pg_log -mtime +{RM_INTERVAL} -name \'*.csv*\' -exec ls -l {{}} \\;"'
+        'gpssh -f ~/allsegs "find /data*/primary/gpseg*/pg_log -mtime +{} -name \'*.csv*\' -exec ls -l {{}} \\;"'.format(RM_INTERVAL)
     )
     info(rmlist)
     run_cmd(
-        f'gpssh -f ~/allsegs "find /data*/primary/gpseg*/pg_log -mtime +{RM_INTERVAL} -name \'*.csv*\' -exec rm -f {{}} \\;"'
+        'gpssh -f ~/allsegs "find /data*/primary/gpseg*/pg_log -mtime +{} -name \'*.csv*\' -exec rm -f {{}} \\;"'.format(RM_INTERVAL)
     )
     rmlist = run_cmd(
-        f'gpssh -f ~/allsegs "find /data*/mirror/gpseg*/pg_log -mtime +{RM_INTERVAL} -name \'*.csv*\' -exec ls -l {{}} \\;"'
+        'gpssh -f ~/allsegs "find /data*/mirror/gpseg*/pg_log -mtime +{} -name \'*.csv*\' -exec ls -l {{}} \\;"'.format(RM_INTERVAL)
     )
     info(rmlist)
     run_cmd(
-        f'gpssh -f ~/allsegs "find /data*/mirror/gpseg*/pg_log -mtime +{RM_INTERVAL} -name \'*.csv*\' -exec rm -f {{}} \\;"'
+        'gpssh -f ~/allsegs "find /data*/mirror/gpseg*/pg_log -mtime +{} -name \'*.csv*\' -exec rm -f {{}} \\;"'.format(RM_INTERVAL)
     )
 
     info("------Segment pg_log gzip list------\n")
     gziplist = run_cmd(
-        f'gpssh -f ~/allsegs "find /data*/primary/gpseg*/pg_log -mtime +{GZIP_INTERVAL} -name \'*.csv\' -exec ls -l {{}} \\;"'
+        'gpssh -f ~/allsegs "find /data*/primary/gpseg*/pg_log -mtime +{} -name \'*.csv\' -exec ls -l {{}} \\;"'.format(GZIP_INTERVAL)
     )
     info(gziplist)
     run_cmd(
-        f'gpssh -f ~/allsegs "find /data*/primary/gpseg*/pg_log -mtime +{GZIP_INTERVAL} -name \'*.csv\' -exec gzip -f {{}} \\;"'
+        'gpssh -f ~/allsegs "find /data*/primary/gpseg*/pg_log -mtime +{} -name \'*.csv\' -exec gzip -f {{}} \\;"'.format(GZIP_INTERVAL)
     )
     gziplist = run_cmd(
-        f'gpssh -f ~/allsegs "find /data*/mirror/gpseg*/pg_log -mtime +{GZIP_INTERVAL} -name \'*.csv\' -exec ls -l {{}} \\;"'
+        'gpssh -f ~/allsegs "find /data*/mirror/gpseg*/pg_log -mtime +{} -name \'*.csv\' -exec ls -l {{}} \\;"'.format(GZIP_INTERVAL)
     )
     info(gziplist)
     run_cmd(
-        f'gpssh -f ~/allsegs "find /data*/mirror/gpseg*/pg_log -mtime +{GZIP_INTERVAL} -name \'*.csv\' -exec gzip -f {{}} \\;"'
+        'gpssh -f ~/allsegs "find /data*/mirror/gpseg*/pg_log -mtime +{} -name \'*.csv\' -exec gzip -f {{}} \\;"'.format(GZIP_INTERVAL)
     )
 
     if fh_log:

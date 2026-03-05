@@ -1,5 +1,6 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Greenplum reclaim space: bloat check and table reorganization with parallel execution."""
+from __future__ import print_function
 
 import argparse
 import os
@@ -8,30 +9,36 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from typing import Optional
 
 # Globals
-hostname: str = "localhost"
-port: str = "5432"
-database: str = "postgres"
-username: str = "gpadmin"
-password: str = "gpadmin"
+hostname = "localhost"
+port = "5432"
+database = "postgres"
+username = "gpadmin"
+password = "gpadmin"
 
-schema_list: list[str] = []
-schema_str: str = ""
-starttime: float = 0.0
-gpver: int = 0
-concurrency: int = 2
-duration: float = 0.0
+schema_list = []
+schema_str = ""
+starttime = 0.0
+gpver = 0
+concurrency = 2
+duration = 0.0
 
-num_proc: int = 0
-num_finish: int = 0
-mainpid: int = os.getpid()
+num_proc = 0
+num_finish = 0
+mainpid = os.getpid()
 
-cmd_name: str = os.path.basename(sys.argv[0])
+cmd_name = os.path.basename(sys.argv[0])
 
 
-def handler(signum: int, frame: object) -> None:
+class _CmdResult(object):
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def handler(signum, frame):
     """Handle SIGCHLD: reap finished child processes."""
     global num_proc, num_finish
 
@@ -53,17 +60,17 @@ def handler(signum: int, frame: object) -> None:
 signal.signal(signal.SIGCHLD, handler)
 
 
-def get_current_date() -> str:
+def get_current_date():
     """Return current date as YYYYMMDD string."""
     return datetime.now().strftime("%Y%m%d")
 
 
-def show_time() -> str:
+def show_time():
     """Return current timestamp as YYYY-MM-DD HH:MM:SS string."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def check_weekday(s_runday: str) -> int:
+def check_weekday(s_runday):
     """Check if today is one of the specified weekdays (1=Mon, 7=Sun). Returns 1 if match or empty."""
     if not s_runday:
         return 1
@@ -75,7 +82,7 @@ def check_weekday(s_runday: str) -> int:
     return 0
 
 
-def check_current_day(exdaystr: str) -> int:
+def check_current_day(exdaystr):
     """Check if today's day-of-month is in the exclude list. Returns 1 if match."""
     if not exdaystr:
         return 0
@@ -88,25 +95,25 @@ def check_current_day(exdaystr: str) -> int:
     return 0
 
 
-def info(printmsg: str) -> int:
+def info(printmsg):
     """Print an INFO message to stdout."""
-    print(f"[{show_time()} INFO] {printmsg}", end="")
+    print("[{0} INFO] {1}".format(show_time(), printmsg), end="")
     return 0
 
 
-def info_notimestr(printmsg: str) -> int:
+def info_notimestr(printmsg):
     """Print a message to stdout without timestamp."""
     print(printmsg, end="")
     return 0
 
 
-def error(printmsg: str) -> int:
+def error(printmsg):
     """Print an ERROR message to stdout."""
-    print(f"[{show_time()} ERROR] {printmsg}", end="")
+    print("[{0} ERROR] {1}".format(show_time(), printmsg), end="")
     return 0
 
 
-def set_env() -> int:
+def set_env():
     """Set PostgreSQL environment variables."""
     os.environ["PGHOST"] = hostname
     os.environ["PGPORT"] = port
@@ -116,34 +123,47 @@ def set_env() -> int:
     return 0
 
 
-def run_psql(sql: str, extra_args: Optional[list[str]] = None,
-             stderr_devnull: bool = False) -> subprocess.CompletedProcess[str]:
+def run_psql(sql, extra_args=None, stderr_devnull=False):
     """Run a psql command and return the result."""
     cmd = ["psql", "-A", "-X", "-t", "-c", sql,
            "-h", hostname, "-p", port, "-U", username, "-d", database]
     if extra_args:
         cmd.extend(extra_args)
-    stderr_target = subprocess.DEVNULL if stderr_devnull else None
-    return subprocess.run(cmd, capture_output=not stderr_devnull, text=True, check=False,
-                          stderr=stderr_target if stderr_devnull else subprocess.PIPE,
-                          stdout=subprocess.PIPE)
+    if stderr_devnull:
+        devnull = open(os.devnull, 'w')
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=devnull)
+    else:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if stderr_devnull:
+        devnull.close()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if err and hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    return _CmdResult(proc.returncode, out, err or '')
 
 
-def get_gpver() -> int:
+def get_gpver():
     """Get the major Greenplum version number."""
     sql = "select version();"
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql, "-d", "postgres"],
-        capture_output=True, text=True, check=False,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    if result.returncode != 0:
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode != 0:
         print("Get GP version error!")
         sys.exit(1)
-    sver = result.stdout.strip()
+    sver = out.strip()
     parts = sver.split()
     if len(parts) > 4:
         print(parts[4])
-        info_notimestr(f"GP Version: {parts[4]}\n")
+        info_notimestr("GP Version: {0}\n".format(parts[4]))
         ver_parts = parts[4].split(".")
         print(ver_parts[0])
         return int(ver_parts[0])
@@ -152,12 +172,12 @@ def get_gpver() -> int:
 
 
 def get_schema(
-    is_all: bool,
-    chk_schema: str,
-    schema_file: str,
-    exclude_schema: str,
-    exclude_schema_file: str,
-) -> None:
+    is_all,
+    chk_schema,
+    schema_file,
+    exclude_schema,
+    exclude_schema_file,
+):
     """Populate schema_list and schema_str based on CLI options."""
     global schema_list, schema_str
 
@@ -177,7 +197,7 @@ def get_schema(
     # --include-schema-file
     if schema_file:
         if not os.path.exists(schema_file):
-            error(f"Schema file {schema_file} do not exist!\n")
+            error("Schema file {0} do not exist!\n".format(schema_file))
             sys.exit(1)
         try:
             with open(schema_file, "r") as f:
@@ -186,16 +206,16 @@ def get_schema(
                     if line and not line.startswith("#"):
                         schema_list.append(line)
         except OSError as e:
-            print(f"{show_time()} open {schema_file} error: {e}")
+            print("{0} open {1} error: {2}".format(show_time(), schema_file, e))
             sys.exit(1)
 
     # --exclude-schema
     if exclude_schema:
         exclude_list = [s.strip() for s in exclude_schema.split(",")]
-        ex_str = "(" + ",".join(f"'{s}'" for s in exclude_list) + ")"
-        print(f"Exclude SCHEMA: {ex_str}")
-        sql = (f"select nspname from pg_namespace where nspname not like 'pg%' "
-               f"and nspname not like 'gp%' and nspname not in {ex_str} order by 1;")
+        ex_str = "(" + ",".join("'{0}'".format(s) for s in exclude_list) + ")"
+        print("Exclude SCHEMA: {0}".format(ex_str))
+        sql = ("select nspname from pg_namespace where nspname not like 'pg%' "
+               "and nspname not like 'gp%' and nspname not in {0} order by 1;".format(ex_str))
         result = run_psql(sql)
         if result.returncode != 0:
             error("Query schema name exclude file error\n")
@@ -205,7 +225,7 @@ def get_schema(
     # --exclude-schema-file
     if exclude_schema_file:
         if not os.path.exists(exclude_schema_file):
-            error(f"Schema file {exclude_schema_file} do not exist!\n")
+            error("Schema file {0} do not exist!\n".format(exclude_schema_file))
             sys.exit(1)
         exclude_list = []
         try:
@@ -215,13 +235,13 @@ def get_schema(
                     if line and not line.startswith("#"):
                         exclude_list.append(line)
         except OSError as e:
-            print(f"{show_time()} open {exclude_schema_file} error: {e}")
+            print("{0} open {1} error: {2}".format(show_time(), exclude_schema_file, e))
             sys.exit(1)
 
-        ex_str = "(" + ",".join(f"'{s}'" for s in exclude_list) + ")"
-        print(f"Exclude SCHEMA: {ex_str}")
-        sql = (f"select nspname from pg_namespace where nspname not like 'pg%' "
-               f"and nspname not like 'gp%' and nspname not in {ex_str} order by 1;")
+        ex_str = "(" + ",".join("'{0}'".format(s) for s in exclude_list) + ")"
+        print("Exclude SCHEMA: {0}".format(ex_str))
+        sql = ("select nspname from pg_namespace where nspname not like 'pg%' "
+               "and nspname not like 'gp%' and nspname not in {0} order by 1;".format(ex_str))
         result = run_psql(sql)
         if result.returncode != 0:
             error("Query schema name exclude file error\n")
@@ -229,15 +249,15 @@ def get_schema(
         schema_list = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
 
     # Build schema_str
-    schema_str = "(" + ",".join(f"'{s}'" for s in schema_list) + ")"
-    print(f"SCHEMA: {schema_str}")
+    schema_str = "(" + ",".join("'{0}'".format(s) for s in schema_list) + ")"
+    print("SCHEMA: {0}".format(schema_str))
 
 
-def bloatcheck() -> int:
+def bloatcheck():
     """Perform bloat check on heap and AO tables."""
     global num_proc, num_finish
 
-    print(f"---Start bloat check, jobs [{concurrency}]")
+    print("---Start bloat check, jobs [{0}]".format(concurrency))
 
     # Create result table
     sql = """drop table if exists bloat_skew_result;
@@ -259,7 +279,7 @@ def bloatcheck() -> int:
 
     # Heap table bloat check
     info("---Start heap table bloat check...\n")
-    sql = f"""drop table if exists pg_stats_bloat_chk;
+    sql = """drop table if exists pg_stats_bloat_chk;
              create temp table pg_stats_bloat_chk
              (
                schemaname varchar(30),
@@ -367,7 +387,8 @@ def bloatcheck() -> int:
                    JOIN pg_namespace_bloat_chk nn ON cc.relnamespace = nn.oid_ss AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema'
                ) AS sml
                WHERE sml.relpages - live_size_blocks > 2
-             ) AS blochk where wastedsize>1073741824 and bloat>1.9;"""
+             ) AS blochk where wastedsize>1073741824 and bloat>1.9;""".format(
+        pg_class_sql=pg_class_sql, schema_str=schema_str)
 
     result = run_psql(sql, stderr_devnull=True)
     if result.returncode != 0:
@@ -383,24 +404,24 @@ def bloatcheck() -> int:
     for icalc in range(itotal):
         pid = os.fork()
         if pid < 0:
-            print(f"Can not fork a child process!!!")
+            print("Can not fork a child process!!!")
             sys.exit(-1)
 
         if pid == 0:
             # Child process
             schema = schema_list[icalc]
-            sql = (f"copy (select schemaname||'.'||tablename,'ao',bloat "
-                   f"from AOtable_bloatcheck('{schema}') where bloat>1.9) "
-                   f"to '/tmp/tmpaobloat.{schema}.dat';")
+            sql = ("copy (select schemaname||'.'||tablename,'ao',bloat "
+                   "from AOtable_bloatcheck('{0}') where bloat>1.9) "
+                   "to '/tmp/tmpaobloat.{0}.dat';".format(schema))
             result = run_psql(sql, stderr_devnull=True)
             if result.returncode != 0:
-                error(f"Unload {schema} AO table error! \n")
+                error("Unload {0} AO table error! \n".format(schema))
                 os._exit(255)
 
-            sql = f"copy bloat_skew_result from '/tmp/tmpaobloat.{schema}.dat';"
+            sql = "copy bloat_skew_result from '/tmp/tmpaobloat.{0}.dat';".format(schema)
             result = run_psql(sql, stderr_devnull=True)
             if result.returncode != 0:
-                error(f"Load {schema} AO bloat into bloat_skew_result error! \n")
+                error("Load {0} AO bloat into bloat_skew_result error! \n".format(schema))
                 os._exit(255)
 
             os._exit(0)
@@ -408,35 +429,41 @@ def bloatcheck() -> int:
         else:
             # Parent process
             num_proc += 1
-            print(f"Child process count [{num_proc}], finish count[{num_finish}/{itotal}]")
+            print("Child process count [{0}], finish count[{1}/{2}]".format(num_proc, num_finish, itotal))
             while num_proc >= concurrency:
                 time.sleep(1)
 
     # Wait for all children
     while num_proc > 0:
         time.sleep(1)
-    print(f"Child process count [{num_proc}], finish count[{num_finish}/{itotal}]")
+    print("Child process count [{0}], finish count[{1}/{2}]".format(num_proc, num_finish, itotal))
 
     # Query results
     sql = "select * from bloat_skew_result order by relstorage,bloat desc;"
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-X", "-c", sql,
          "-h", hostname, "-p", port, "-U", username, "-d", database],
-        capture_output=True, text=True, check=False,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    result = _CmdResult(proc.returncode, out, err or '')
     if result.returncode != 0:
         error("Query bloat check result error! \n")
         return -1
     info("---Bloat check result\n")
-    info_notimestr(f"\n{result.stdout}\n")
+    info_notimestr("\n{0}\n".format(result.stdout))
     return 0
 
 
-def parallel_run() -> int:
+def parallel_run():
     """Reclaim space by reorganizing bloated tables in parallel."""
     global num_proc, num_finish
 
-    print(f"---Start reclaim space, jobs [{concurrency}]")
+    print("---Start reclaim space, jobs [{0}]".format(concurrency))
     sql = "select tablename from bloat_skew_result order by bloat desc;"
     result = run_psql(sql)
     if result.returncode != 0:
@@ -463,43 +490,43 @@ def parallel_run() -> int:
         if pid == 0:
             # Child process
             table = reclaimlist[icalc]
-            sql = f"alter table {table} set with (reorganize=true);"
-            info(f" [{sql}]\n")
+            sql = "alter table {0} set with (reorganize=true);".format(table)
+            info(" [{0}]\n".format(sql))
             result = run_psql(sql, stderr_devnull=True)
             if result.returncode != 0:
-                error(f"alter table {table} error! \n[{result.stdout}]\n")
+                error("alter table {0} error! \n[{1}]\n".format(table, result.stdout))
                 os._exit(255)
             os._exit(0)
 
         else:
             # Parent process
             num_proc += 1
-            print(f"Child process count [{num_proc}], finish count[{num_finish}/{itotal}]")
+            print("Child process count [{0}], finish count[{1}/{2}]".format(num_proc, num_finish, itotal))
             while num_proc >= concurrency:
                 time.sleep(1)
 
     # Wait for all children
     while num_proc > 0:
         time.sleep(1)
-    print(f"Child process count [{num_proc}], finish count[{num_finish}/{itotal}]")
+    print("Child process count [{0}], finish count[{1}/{2}]".format(num_proc, num_finish, itotal))
     return 0
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
     """Parse command line arguments."""
     if len(sys.argv) == 1:
-        print(f"Input error: \nPlease show help: python3 {cmd_name} --help")
+        print("Input error: \nPlease show help: python3 {0} --help".format(cmd_name))
         sys.exit(0)
 
     parser = argparse.ArgumentParser(
         description="Greenplum reclaim space script",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f"""Examples:
-  python3 {cmd_name} -d testdb -u gpadmin --include-schema gpp_sync,syndata --jobs 3
-  python3 {cmd_name} -d testdb -u gpadmin --include-schema-file /tmp/schema.conf --jobs 3
-  python3 {cmd_name} -d testdb -u gpadmin --exclude-schema dw,public --jobs 3
-  python3 {cmd_name} -d testdb -u gpadmin -s gpp_sync,syndata --jobs 3 --week-day 6,7 --exclude-date 1,2,5,6 --duration 2
-""",
+        epilog="""Examples:
+  python3 {0} -d testdb -u gpadmin --include-schema gpp_sync,syndata --jobs 3
+  python3 {0} -d testdb -u gpadmin --include-schema-file /tmp/schema.conf --jobs 3
+  python3 {0} -d testdb -u gpadmin --exclude-schema dw,public --jobs 3
+  python3 {0} -d testdb -u gpadmin -s gpp_sync,syndata --jobs 3 --week-day 6,7 --exclude-date 1,2,5,6 --duration 2
+""".format(cmd_name),
     )
     parser.add_argument("--hostname", "-H", default="localhost",
                         help="Master hostname or master host IP. Default: localhost")
@@ -556,7 +583,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def main() -> None:
+def main():
     """Main entry point."""
     global hostname, port, database, username, password
     global concurrency, duration, starttime, gpver
@@ -578,10 +605,10 @@ def main() -> None:
     chkret2 = check_current_day(args.exclude_date)
 
     if chkret2:
-        info(f"Today is {get_current_date()}. Program stopped!\n")
+        info("Today is {0}. Program stopped!\n".format(get_current_date()))
         sys.exit(0)
     if chkret1 == 0:
-        info(f"Today is not {args.week_day} of week. Program stopped!\n")
+        info("Today is not {0} of week. Program stopped!\n".format(args.week_day))
         sys.exit(0)
 
     info("-----------------------------------------------------\n")
