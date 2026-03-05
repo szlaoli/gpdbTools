@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""GPDB analyze root partition tables for specific schema.
+
+Command line: python3 analyze_root_for_schema.py dbname schema concurrency
+"""
+
+import os
+import subprocess
+import sys
+import time
+from multiprocessing import Process
+
+
+def set_env(database: str) -> int:
+    os.environ["PGHOST"] = "localhost"
+    os.environ["PGDATABASE"] = database
+    os.environ["PGUSER"] = "gpadmin"
+    os.environ["PGPASSWORD"] = "gpadmin"
+    return 0
+
+
+def run_psql(sql: str) -> tuple[int, str]:
+    """Run psql command and return (returncode, output)."""
+    result = subprocess.run(
+        ["psql", "-A", "-X", "-t", "-c", sql],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode, result.stdout
+
+
+def get_tablelist(schemaname: str) -> tuple[int, list[str]]:
+    # root partition
+    if schemaname == "ALL":
+        sql = (
+            " select 'analyze rootpartition '||aa.nspname||'.'||bb.relname||';'"
+            " from pg_namespace aa,pg_class bb"
+            " where aa.oid=bb.relnamespace and aa.nspname not like 'pg%' and aa.nspname not like 'gp%'"
+            " and bb.relkind='r' and bb.relstorage!='x'"
+            " and bb.relhassubclass=true; "
+        )
+        print(f'psql -A -X -t -c "{sql}" ')
+        ret, output = run_psql(sql)
+        if ret >> 8 if ret > 255 else ret:
+            print("psql ALL rootpartition error ")
+            return -1, []
+    else:
+        tmpsss = schemaname.replace(",", "','")
+        curr_schema = f"('{tmpsss}')"
+        sql = (
+            f" select 'analyze rootpartition '||aa.nspname||'.'||bb.relname||';'"
+            f" from pg_namespace aa,pg_class bb"
+            f" where aa.oid=bb.relnamespace and aa.nspname in {curr_schema}"
+            f" and bb.relkind='r' and bb.relstorage!='x'"
+            f" and bb.relhassubclass=true; "
+        )
+        print(f'psql -A -X -t -c "{sql}" ')
+        ret, output = run_psql(sql)
+        if ret >> 8 if ret > 255 else ret:
+            print("psql rootpartition error ")
+            return -1, []
+
+    return 0, output.splitlines()
+
+
+def analyze_worker(sql: str) -> None:
+    """Child process: run a single ANALYZE command via psql."""
+    result = subprocess.run(
+        ["psql", "-A", "-X", "-t", "-c", sql],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        print(f"Analyze error: {result.stdout}{result.stderr}")
+
+
+def main() -> int:
+    if len(sys.argv) != 4:
+        print(
+            f"Argument number Error\nExample:\n"
+            f"python3 {sys.argv[0]} dbname schema concurrency"
+        )
+        sys.exit(1)
+
+    database = sys.argv[1]
+    schemaname = sys.argv[2]
+    concurrency = int(sys.argv[3])
+
+    set_env(database)
+
+    ret, target_tablelist = get_tablelist(schemaname)
+    if ret:
+        print("Get table list for analyze error!")
+        sys.exit(1)
+
+    itotal = len(target_tablelist)
+    print(f"Total count [{itotal}]")
+
+    num_finish = 0
+    active_procs: list[Process] = []
+
+    for icalc in range(itotal):
+        sql = target_tablelist[icalc].strip()
+        print(f"[SQL]=[{sql}]")
+
+        proc = Process(target=analyze_worker, args=(sql,))
+        proc.start()
+        active_procs.append(proc)
+
+        if num_finish % 10 == 0:
+            print(
+                f"Child process count [{len(active_procs)}], "
+                f"finish count[{num_finish}/{itotal}]"
+            )
+
+        # Wait until active processes < concurrency
+        while len(active_procs) >= concurrency:
+            time.sleep(1)
+            still_active: list[Process] = []
+            for p in active_procs:
+                if p.is_alive():
+                    still_active.append(p)
+                else:
+                    p.join()
+                    num_finish += 1
+            active_procs = still_active
+
+    # Wait for all child processes
+    for p in active_procs:
+        p.join()
+        num_finish += 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
