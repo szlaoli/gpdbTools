@@ -13,7 +13,10 @@
 # import mainUtils FIRST to get python version check
 from gppylib.mainUtils import *
 from optparse import OptionParser
-from Queue import Queue, Empty
+try:
+    from Queue import Queue, Empty
+except ImportError:
+    from queue import Queue, Empty
 import os
 import re
 import shutil
@@ -33,7 +36,7 @@ try:
     from gppylib.operations.unix import CheckDir, CheckFile, MakeDir
     from pygresql import pg
 
-except ImportError, e:
+except ImportError as e:
     sys.exit('Cannot import modules.  Please check that you have sourced greenplum_path.sh.  Detail: ' + str(e))
 
 EXECNAME = 'analyzedb'
@@ -463,7 +466,7 @@ class AnalyzeDb(Operation):
                 self._write_report(curr_ao_state, curr_last_op, heap_partitions, input_col_dict,
                                    root_partition_col_dict, dirty_partitions, target_list)
                 logger.info("Done.")
-        except Exception, ex:
+        except Exception as ex:
             logger.exception(ex)
             raise
 
@@ -966,7 +969,7 @@ def run_sql(conn, query):
     try:
         cursor = dbconn.execSQL(conn, query)
         res = cursor.fetchall()
-    except Exception, db_err:
+    except Exception as db_err:
         raise ExceptionNoStackTraceNeeded("%s" % db_err.__str__())  # .split('\n')[0])
     cursor.close()
     return res
@@ -1200,7 +1203,7 @@ def validate_dir(path):
     else:
         try:
             MakeDir(path).run()
-        except OSError, e:
+        except OSError as e:
             logger.exception("Could not create directory %s" % path)
             raise AnalyzeDirCreateFailed()
         else:
@@ -1208,7 +1211,7 @@ def validate_dir(path):
     try:
         with tempfile.TemporaryFile(dir=path) as f:
             pass
-    except Exception, e:
+    except Exception as e:
         logger.exception("Cannot write to %s" % path)
         raise AnalyzeDirNotWritable()
 
@@ -1430,7 +1433,7 @@ class AnalyzeWorker(Worker):
                     self.pool.addFinishedWorkItem(self.cmd)
                     self.cmd = None
 
-            except Exception, e:
+            except Exception as e:
                 self.logger.exception(e)
                 if self.cmd:
                     self.logger.debug("[%s] finished cmd with exception: %s" % (self.name, self.cmd))

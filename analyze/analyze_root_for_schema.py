@@ -1,7 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+from __future__ import print_function
 """GPDB analyze root partition tables for specific schema.
 
-Command line: python3 analyze_root_for_schema.py dbname schema concurrency
+Command line: python analyze_root_for_schema.py dbname schema concurrency
 """
 
 import os
@@ -11,7 +12,7 @@ import time
 from multiprocessing import Process
 
 
-def set_env(database: str) -> int:
+def set_env(database):
     os.environ["PGHOST"] = "localhost"
     os.environ["PGDATABASE"] = database
     os.environ["PGUSER"] = "gpadmin"
@@ -19,17 +20,19 @@ def set_env(database: str) -> int:
     return 0
 
 
-def run_psql(sql: str) -> tuple[int, str]:
+def run_psql(sql):
     """Run psql command and return (returncode, output)."""
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    return result.returncode, result.stdout
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    return proc.returncode, out
 
 
-def get_tablelist(schemaname: str) -> tuple[int, list[str]]:
+def get_tablelist(schemaname):
     # root partition
     if schemaname == "ALL":
         sql = (
@@ -39,22 +42,22 @@ def get_tablelist(schemaname: str) -> tuple[int, list[str]]:
             " and bb.relkind='r' and bb.relstorage!='x'"
             " and bb.relhassubclass=true; "
         )
-        print(f'psql -A -X -t -c "{sql}" ')
+        print('psql -A -X -t -c "{}" '.format(sql))
         ret, output = run_psql(sql)
         if ret >> 8 if ret > 255 else ret:
             print("psql ALL rootpartition error ")
             return -1, []
     else:
         tmpsss = schemaname.replace(",", "','")
-        curr_schema = f"('{tmpsss}')"
+        curr_schema = "('{}')".format(tmpsss)
         sql = (
-            f" select 'analyze rootpartition '||aa.nspname||'.'||bb.relname||';'"
-            f" from pg_namespace aa,pg_class bb"
-            f" where aa.oid=bb.relnamespace and aa.nspname in {curr_schema}"
-            f" and bb.relkind='r' and bb.relstorage!='x'"
-            f" and bb.relhassubclass=true; "
+            " select 'analyze rootpartition '||aa.nspname||'.'||bb.relname||';'"
+            " from pg_namespace aa,pg_class bb"
+            " where aa.oid=bb.relnamespace and aa.nspname in {}"
+            " and bb.relkind='r' and bb.relstorage!='x'"
+            " and bb.relhassubclass=true; ".format(curr_schema)
         )
-        print(f'psql -A -X -t -c "{sql}" ')
+        print('psql -A -X -t -c "{}" '.format(sql))
         ret, output = run_psql(sql)
         if ret >> 8 if ret > 255 else ret:
             print("psql rootpartition error ")
@@ -63,22 +66,26 @@ def get_tablelist(schemaname: str) -> tuple[int, list[str]]:
     return 0, output.splitlines()
 
 
-def analyze_worker(sql: str) -> None:
+def analyze_worker(sql):
     """Child process: run a single ANALYZE command via psql."""
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    if result.returncode:
-        print(f"Analyze error: {result.stdout}{result.stderr}")
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
+        print("Analyze error: {}{}".format(out, err))
 
 
-def main() -> int:
+def main():
     if len(sys.argv) != 4:
         print(
-            f"Argument number Error\nExample:\n"
-            f"python3 {sys.argv[0]} dbname schema concurrency"
+            "Argument number Error\nExample:\n"
+            "python {} dbname schema concurrency".format(sys.argv[0])
         )
         sys.exit(1)
 
@@ -94,14 +101,14 @@ def main() -> int:
         sys.exit(1)
 
     itotal = len(target_tablelist)
-    print(f"Total count [{itotal}]")
+    print("Total count [{}]".format(itotal))
 
     num_finish = 0
-    active_procs: list[Process] = []
+    active_procs = []
 
     for icalc in range(itotal):
         sql = target_tablelist[icalc].strip()
-        print(f"[SQL]=[{sql}]")
+        print("[SQL]=[{}]".format(sql))
 
         proc = Process(target=analyze_worker, args=(sql,))
         proc.start()
@@ -109,14 +116,14 @@ def main() -> int:
 
         if num_finish % 10 == 0:
             print(
-                f"Child process count [{len(active_procs)}], "
-                f"finish count[{num_finish}/{itotal}]"
+                "Child process count [{}], "
+                "finish count[{}/{}]".format(len(active_procs), num_finish, itotal)
             )
 
         # Wait until active processes < concurrency
         while len(active_procs) >= concurrency:
             time.sleep(1)
-            still_active: list[Process] = []
+            still_active = []
             for p in active_procs:
                 if p.is_alive():
                     still_active.append(p)

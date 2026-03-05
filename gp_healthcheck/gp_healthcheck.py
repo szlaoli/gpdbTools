@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+from __future__ import print_function
 import argparse
 import os
 import subprocess
@@ -6,117 +7,138 @@ import sys
 import time
 from datetime import datetime
 from multiprocessing import Process, Value
-from typing import IO, Optional
+
+
+class _CmdResult(object):
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 cmd_name = os.path.basename(sys.argv[0])
-hostname: str = "localhost"
-port: str = "5432"
-database: str = ""
-username: str = "gpadmin"
-password: str = "gpadmin"
-IS_ALLDB: bool = False
-IS_ALLSCHEMA: int = 0
-IS_SKIPUDF: bool = False
-FUNC_DIR: str = ""
-CHK_SCHEMA: list[str] = []
-SCHEMA_FILE: str = ""
-concurrency: int = 2
-LOG_DIR: str = ""
-fh_log: Optional[IO[str]] = None
-schema_list: list[str] = []
-schema_str: str = ""
-gpver: str = ""
-dbname_list: list[str] = []
+hostname = "localhost"
+port = "5432"
+database = ""
+username = "gpadmin"
+password = "gpadmin"
+IS_ALLDB = False
+IS_ALLSCHEMA = 0
+IS_SKIPUDF = False
+FUNC_DIR = ""
+CHK_SCHEMA = []
+SCHEMA_FILE = ""
+concurrency = 2
+LOG_DIR = ""
+fh_log = None
+schema_list = []
+schema_str = ""
+gpver = ""
+dbname_list = []
 
 
-def get_current_date() -> str:
+def get_current_date():
     return datetime.now().strftime("%Y%m%d")
 
 
-def show_time() -> str:
+def show_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def init_log() -> None:
+def init_log():
     global fh_log
     logday = get_current_date()
     if LOG_DIR == "~/gpAdminLogs":
-        logpath = f"{os.environ['HOME']}/gpAdminLogs/{cmd_name}_{logday}.log"
+        logpath = "{0}/gpAdminLogs/{1}_{2}.log".format(os.environ['HOME'], cmd_name, logday)
     else:
-        logpath = f"{LOG_DIR}/{cmd_name}_{logday}.log"
+        logpath = "{0}/{1}_{2}.log".format(LOG_DIR, cmd_name, logday)
     try:
         fh_log = open(logpath, "a")
     except OSError:
-        print(f"[ERROR]:Cound not open logfile {logpath}")
+        print("[ERROR]:Cound not open logfile {0}".format(logpath))
         sys.exit(-1)
 
 
-def info(printmsg: str) -> int:
+def info(printmsg):
     if fh_log:
-        fh_log.write(f"[{show_time()} INFO] {printmsg}")
+        fh_log.write("[{0} INFO] {1}".format(show_time(), printmsg))
     return 0
 
 
-def info_notimestr(printmsg: str) -> int:
+def info_notimestr(printmsg):
     if fh_log:
         fh_log.write(printmsg)
     return 0
 
 
-def error(printmsg: str) -> int:
+def error(printmsg):
     if fh_log:
-        fh_log.write(f"[{show_time()} ERROR] {printmsg}")
+        fh_log.write("[{0} ERROR] {1}".format(show_time(), printmsg))
     return 0
 
 
-def close_log() -> None:
+def close_log():
     if fh_log:
         fh_log.close()
 
 
-def set_env() -> None:
+def set_env():
     os.environ["PGHOST"] = hostname
     os.environ["PGPORT"] = port
     os.environ["PGUSER"] = username
     os.environ["PGPASSWORD"] = password
 
 
-def run_psql(args: list[str]) -> tuple[int, str]:
-    result = subprocess.run(args, capture_output=True, text=True)
-    return result.returncode, result.stdout
+def run_psql(args):
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    return proc.returncode, out
 
 
-def run_psql_simple(sql: str, extra_flags: str = "-A -X -t") -> tuple[int, str]:
+def run_psql_simple(sql, extra_flags="-A -X -t"):
     flags = extra_flags.split()
     args = ["psql"] + flags + ["-c", sql, "-h", hostname, "-p", port, "-U", username, "-d", database]
-    result = subprocess.run(args, capture_output=True, text=True)
-    return result.returncode, result.stdout
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    return proc.returncode, out
 
 
-def get_gpver() -> str:
+def get_gpver():
     sql = "select version();"
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql, "-d", "postgres"],
-        capture_output=True, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
         print("Get GP version error!")
         sys.exit(1)
-    sver = result.stdout.strip()
+    sver = out.strip()
 
     if "Greenplum Database" in sver:
         tmpstr = sver.split(" ")
         print(tmpstr[4])
-        info_notimestr(f"GP Version: {tmpstr[4]}\n")
+        info_notimestr("GP Version: {0}\n".format(tmpstr[4]))
         tmpver = tmpstr[4].split(".")
-        sresult = f"gp{tmpver[0]}"
+        sresult = "gp{0}".format(tmpver[0])
         print(sresult)
     elif "Cloudberry Database" in sver or "Apache Cloudberry" in sver:
         tmpstr = sver.split(" ")
         print(tmpstr[4])
-        info_notimestr(f"CBDB Version: {tmpstr[4]}\n")
-        sresult = f"cbdb{tmpstr[4]}"
+        info_notimestr("CBDB Version: {0}\n".format(tmpstr[4]))
+        sresult = "cbdb{0}".format(tmpstr[4])
         print(sresult)
     else:
         sresult = ""
@@ -124,7 +146,7 @@ def get_gpver() -> str:
     return sresult
 
 
-def get_dbname() -> None:
+def get_dbname():
     global dbname_list, IS_ALLSCHEMA
 
     if IS_ALLDB:
@@ -142,14 +164,14 @@ def get_dbname() -> None:
         dbname_list = [database]
 
 
-def get_schema() -> None:
+def get_schema():
     global schema_list, schema_str, IS_ALLSCHEMA
 
     if CHK_SCHEMA:
         schema_list = list(CHK_SCHEMA)
     elif SCHEMA_FILE:
         if not os.path.exists(SCHEMA_FILE):
-            error(f"Schema file {SCHEMA_FILE} do not exist!\n")
+            error("Schema file {0} do not exist!\n".format(SCHEMA_FILE))
             sys.exit(1)
         with open(SCHEMA_FILE) as f:
             schema_list = [
@@ -170,15 +192,14 @@ def get_schema() -> None:
             sys.exit(1)
         schema_list = [s.strip() for s in output.strip().split("\n") if s.strip()]
 
-    parts = [f"'{s}'" for s in schema_list]
-    schema_str = "(" + ",".join(parts) + ")"
-    print(f"SCHEMA: {schema_str}")
-    info_notimestr(f"SCHEMA: {schema_str}\n")
+    schema_str = "('" + "','".join(schema_list) + "')"
+    print("SCHEMA: {0}".format(schema_str))
+    info_notimestr("SCHEMA: {0}\n".format(schema_str))
 
 
-def check_udf() -> int:
-    print(f"---Check healthcheck UDF in DB: {database}")
-    info(f"---Check healthcheck UDF in DB: {database}\n")
+def check_udf():
+    print("---Check healthcheck UDF in DB: {0}".format(database))
+    info("---Check healthcheck UDF in DB: {0}\n".format(database))
 
     sql = "select count(*) from pg_proc where proname in ('skewcheck_func','aotable_bloatcheck','load_files_size');"
     ret, output = run_psql([
@@ -192,63 +213,71 @@ def check_udf() -> int:
     if func_cnt >= 3:
         return 1
     else:
-        info(f"UDF was not created in DB: {database}\n")
+        info("UDF was not created in DB: {0}\n".format(database))
         return 0
 
 
-def create_udf() -> None:
+def create_udf():
     if not FUNC_DIR:
         error("Please specified the directory of UDF scripts!\n")
         sys.exit(1)
 
-    print(f"---Create healthcheck UDF in DB: {database}")
-    info(f"---Create healthcheck UDF in DB: {database}\n")
+    print("---Create healthcheck UDF in DB: {0}".format(database))
+    info("---Create healthcheck UDF in DB: {0}\n".format(database))
 
     psql_base = ["psql", "-A", "-X", "-t", "-h", hostname, "-p", port, "-U", username, "-d", database]
 
     if "cbdb" in gpver:
         files = [
-            f"{FUNC_DIR}/aobloat/check_ao_bloat_gp7.sql",
-            f"{FUNC_DIR}/gpsize/load_files_size_cbdb.sql",
-            f"{FUNC_DIR}/skew/skewcheck_func_gp7.sql",
+            "{0}/aobloat/check_ao_bloat_gp7.sql".format(FUNC_DIR),
+            "{0}/gpsize/load_files_size_cbdb.sql".format(FUNC_DIR),
+            "{0}/skew/skewcheck_func_gp7.sql".format(FUNC_DIR),
         ]
     elif "gp7" in gpver:
         files = [
-            f"{FUNC_DIR}/aobloat/check_ao_bloat_gp7.sql",
-            f"{FUNC_DIR}/gpsize/load_files_size_v7.sql",
-            f"{FUNC_DIR}/skew/skewcheck_func_gp7.sql",
+            "{0}/aobloat/check_ao_bloat_gp7.sql".format(FUNC_DIR),
+            "{0}/gpsize/load_files_size_v7.sql".format(FUNC_DIR),
+            "{0}/skew/skewcheck_func_gp7.sql".format(FUNC_DIR),
         ]
     elif "gp6" in gpver:
         files = [
-            f"{FUNC_DIR}/aobloat/check_ao_bloat.sql",
-            f"{FUNC_DIR}/gpsize/load_files_size_v6.sql",
-            f"{FUNC_DIR}/skew/skewcheck_func_gp6.sql",
+            "{0}/aobloat/check_ao_bloat.sql".format(FUNC_DIR),
+            "{0}/gpsize/load_files_size.sql".format(FUNC_DIR),
+            "{0}/skew/skewcheck_func.sql".format(FUNC_DIR),
         ]
     else:
         files = [
-            f"{FUNC_DIR}/aobloat/check_ao_bloat.sql",
-            f"{FUNC_DIR}/gpsize/load_files_size.sql",
-            f"{FUNC_DIR}/skew/skewcheck_func.sql",
+            "{0}/aobloat/check_ao_bloat.sql".format(FUNC_DIR),
+            "{0}/gpsize/load_files_size.sql".format(FUNC_DIR),
+            "{0}/skew/skewcheck_func.sql".format(FUNC_DIR),
         ]
 
     rets = []
     for sqlfile in files:
-        result = subprocess.run(psql_base + ["-f", sqlfile], capture_output=True, text=True)
-        rets.append(result.returncode)
+        proc = subprocess.Popen(psql_base + ["-f", sqlfile], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err = proc.communicate()
+        rets.append(proc.returncode)
 
     if any(rets):
         error("Create healthcheck UDF error!\n")
         sys.exit(1)
 
 
-def gpstate() -> None:
+def gpstate():
     print("---Check gpstate and gp_configuration_history")
     info("---gpstate\n")
 
-    result = subprocess.run(["gpstate", "-e"], capture_output=True, text=True)
-    info_notimestr(f"\n{result.stdout}\n")
-    result = subprocess.run(["gpstate", "-f"], capture_output=True, text=True)
-    info_notimestr(f"{result.stdout}\n")
+    proc = subprocess.Popen(["gpstate", "-e"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    info_notimestr("\n{0}\n".format(out))
+
+    proc = subprocess.Popen(["gpstate", "-f"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    info_notimestr("{0}\n".format(out))
 
     sql = "select * from gp_configuration_history order by 1 desc limit 50;"
     ret, confhis = run_psql([
@@ -259,10 +288,10 @@ def gpstate() -> None:
         error("Get gp_configuration_history error\n")
         return
     info("---gp_configuration_history\n")
-    info_notimestr(f"{confhis}\n")
+    info_notimestr("{0}\n".format(confhis))
 
 
-def gpclusterinfo() -> None:
+def gpclusterinfo():
     print("---Check GP cluster info")
 
     psql_base = ["psql", "-A", "-X", "-t", "-h", hostname, "-p", port, "-U", username, "-d", "postgres"]
@@ -273,10 +302,10 @@ def gpclusterinfo() -> None:
         ("allhosts", "", "/tmp/tmpallhosts"),
         ("allsegs", "where content>-1", "/tmp/tmpallsegs"),
     ]:
-        sql = f"copy (select distinct address from gp_segment_configuration {where_clause} order by 1) to '{tmpfile}';"
+        sql = "copy (select distinct address from gp_segment_configuration {0} order by 1) to '{1}';".format(where_clause, tmpfile)
         ret, _ = run_psql(psql_base + ["-c", sql])
         if ret:
-            error(f"Export tmp {label} error\n")
+            error("Export {0} error\n".format(label))
             sys.exit(1)
 
     # Global info
@@ -295,23 +324,26 @@ def gpclusterinfo() -> None:
     segcount = segcount.strip()
 
     info("---GP Cluster info\n")
-    info_notimestr(f"Segment hosts: {hostcount}\nPrimary segment instances: {segcount}\n\n")
+    info_notimestr("Segment hosts: {0}\nPrimary segment instances: {1}\n\n".format(hostcount, segcount))
 
 
-def disk_space() -> None:
+def disk_space():
     print("---Check hosts disk space")
-    result = subprocess.run(
+    proc = subprocess.Popen(
         'gpssh -f /tmp/tmpallhosts "df -h 2>/dev/null |grep data"',
-        shell=True, capture_output=True, text=True
+        shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if proc.returncode:
         error("Gpssh check segment space error\n")
         return
     info("---Hosts disk space\n")
-    info_notimestr(f"{result.stdout}\n\n")
+    info_notimestr("{0}\n\n".format(out))
 
 
-def db_size() -> None:
+def db_size():
     print("---Check database size")
     sql = ("select datname,pg_size_pretty(pg_database_size(oid)) from pg_database "
            "where datname not in ('postgres','template1','template0');")
@@ -323,10 +355,10 @@ def db_size() -> None:
         error("Query db size error\n")
         return
     info("---Database size\n")
-    info_notimestr(f"{dbsizeinfo}\n\n")
+    info_notimestr("{0}\n\n".format(dbsizeinfo))
 
 
-def chk_age() -> None:
+def chk_age():
     print("---Check database AGE")
     sql = "select datname,age(datfrozenxid) from pg_database order by 2 desc;"
     ret, master_age = run_psql([
@@ -348,9 +380,9 @@ def chk_age() -> None:
 
     info("---Database AGE\n")
     info("---Master\n")
-    info_notimestr(f"{master_age}\n")
+    info_notimestr("{0}\n".format(master_age))
     info("---Segment instance\n")
-    info_notimestr(f"{seg_age}\n")
+    info_notimestr("{0}\n".format(seg_age))
 
     print("---Check global xid")
     sql = "begin;select gp_distributed_xid();"
@@ -362,10 +394,10 @@ def chk_age() -> None:
         error("Query global xid error! \n")
         return
     info("---Global xid\n")
-    info_notimestr(f"{chk_gxid}\n")
+    info_notimestr("{0}\n".format(chk_gxid))
 
 
-def chk_activity() -> None:
+def chk_activity():
     print("---Check pg_stat_activity")
 
     if gpver in ("gp6", "gp7") or "cbdb" in gpver:
@@ -374,8 +406,8 @@ def chk_activity() -> None:
                "(now()-xact_start>interval '1 day' or now()-state_change>interval '1 day')")
     else:
         sql = ("select procpid,sess_id,usename,current_query,query_start,xact_start,backend_start,client_addr "
-               "from pg_stat_activity where current_query='<IDLE> in transaction' and "
-               "(now()-xact_start>interval '1 day' or now()-query_start>interval '1 day')")
+               "from pg_stat_activity where current_query like '<IDLE> in transaction%' and "
+               "(now()-xact_start>interval '1 day')")
 
     ret, idle_info = run_psql([
         "psql", "-X", "-c", sql,
@@ -385,7 +417,7 @@ def chk_activity() -> None:
         error("Query IDLE in transaction error! \n")
         return
     info("---Check IDLE in transaction over one day\n")
-    info_notimestr(f"{idle_info}\n")
+    info_notimestr("{0}\n".format(idle_info))
 
     if gpver == "gp7" or "cbdb" in gpver:
         sql = ("select pid,sess_id,usename,substr(query,1,100) query,wait_event_type,wait_event,query_start,xact_start,backend_start,client_addr "
@@ -405,10 +437,10 @@ def chk_activity() -> None:
         error("Query long SQL error! \n")
         return
     info("---Check SQL running over one day\n")
-    info_notimestr(f"{query_info}\n")
+    info_notimestr("{0}\n".format(query_info))
 
 
-def object_size() -> None:
+def object_size():
     print("---Load data file size on all segments")
 
     sql = "truncate gp_seg_size_ora; truncate gp_seg_table_size;"
@@ -434,7 +466,7 @@ def object_size() -> None:
         error("Query schema size error\n")
         return
     info("---Schema size\n")
-    info_notimestr(f"{schemasizeinfo}\n\n")
+    info_notimestr("{0}\n\n".format(schemasizeinfo))
 
     print("---Check Tablespace size")
     sql = ("select case when spcname is null then 'pg_default' else spcname end as tsname, "
@@ -451,7 +483,7 @@ def object_size() -> None:
         error("Query Tablespace size error\n")
         return
     info("---Tablespace size\n")
-    info_notimestr(f"{tssizeinfo}\n\n")
+    info_notimestr("{0}\n\n".format(tssizeinfo))
 
     print("---Check Tablespace filenum")
     sql = ("select tsname,segfilenum as max_segfilenum "
@@ -472,7 +504,7 @@ def object_size() -> None:
         error("Query Tablespace filenum error\n")
         return
     info("---Tablespace filenum\n")
-    info_notimestr(f"{tsfilenuminfo}\n\n")
+    info_notimestr("{0}\n\n".format(tsfilenuminfo))
 
     print("---Check Large table top 50")
     if gpver == "gp7" or "cbdb" in gpver:
@@ -489,7 +521,7 @@ def object_size() -> None:
         error("Query AO table error\n")
         return
     info("---AO Table top 50\n")
-    info_notimestr(f"{aotableinfo}\n\n")
+    info_notimestr("{0}\n\n".format(aotableinfo))
 
     if gpver == "gp7" or "cbdb" in gpver:
         sql = ("select b.nspname||'.'||a.relname as tablename, d.amname, pg_size_pretty(sum(a.size)::bigint) as table_size "
@@ -505,7 +537,7 @@ def object_size() -> None:
         error("Query Heap table error\n")
         return
     info("---Heap Table top 50\n")
-    info_notimestr(f"{heaptableinfo}\n\n")
+    info_notimestr("{0}\n\n".format(heaptableinfo))
 
     if gpver == "gp7" or "cbdb" in gpver:
         sql = ("select pg_partition_root(c.oid)::regclass as root_partition, "
@@ -524,7 +556,7 @@ def object_size() -> None:
         error("Query partition table size error\n")
         return
     info("---Partition Table Size top 100\n")
-    info_notimestr(f"{parttableinfo}\n\n")
+    info_notimestr("{0}\n\n".format(parttableinfo))
 
     if gpver == "gp7" or "cbdb" in gpver:
         sql = ("select b.nspname||'.'||a.relname as tablename, d.amname, pg_size_pretty(sum(a.size)::bigint) as table_size "
@@ -543,7 +575,7 @@ def object_size() -> None:
         error("Query temp table size error\n")
         return
     info("---Temp Table Size top 50\n")
-    info_notimestr(f"{temptableinfo}\n\n")
+    info_notimestr("{0}\n\n".format(temptableinfo))
 
     sql = ("select schemaname||'.'||tablename tablename,pg_size_pretty(pg_relation_size(schemaname||'.'||tablename)) table_size, "
            "schemaname||'.'||indexname indexname,pg_size_pretty(pg_relation_size(schemaname||'.'||indexname)) index_size "
@@ -553,10 +585,10 @@ def object_size() -> None:
         error("Query index size error\n")
         return
     info("---Index Size top 50\n")
-    info_notimestr(f"{indexinfo}\n\n")
+    info_notimestr("{0}\n\n".format(indexinfo))
 
 
-def chk_catalog() -> None:
+def chk_catalog():
     gp_session_role_name = "gp_role" if "cbdb" in gpver else "gp_session_role"
 
     print("---Check pg_catalog")
@@ -587,15 +619,20 @@ def chk_catalog() -> None:
 
     sql = "select pg_size_pretty(pg_relation_size('pg_namespace')),pg_relation_size('pg_namespace');"
     env = dict(os.environ)
-    env["PGOPTIONS"] = f"-c {gp_session_role_name}=utility"
-    result = subprocess.run(
+    env["PGOPTIONS"] = "-c {0}=utility".format(gp_session_role_name)
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql, "-h", hostname, "-p", port, "-U", username, "-d", database],
-        capture_output=True, text=True, env=env
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
         print("pg_namespace master size error!")
         return
-    tmp_result = result.stdout.strip()
+    tmp_result = out.strip()
     tmpstr = tmp_result.split("|")
     pg_namespace_master = tmpstr[0]
     pg_namespace_master_int = int(tmpstr[1])
@@ -609,14 +646,19 @@ def chk_catalog() -> None:
 
     sql = ("create temp table tmp_pg_namespace_record as select * from pg_namespace;\n"
            "select pg_relation_size('tmp_pg_namespace_record');")
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-q", "-t", "-c", sql, "-h", hostname, "-p", port, "-U", username, "-d", database],
-        capture_output=True, text=True, env=env
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
         print("pg_namespace realsize error!")
         return
-    pg_namespace_realsize = int(result.stdout.strip())
+    pg_namespace_realsize = int(out.strip())
     pg_namespace_master_bloat = pg_namespace_master_int / pg_namespace_realsize if pg_namespace_realsize else 0
 
     sql = "select count(*) from pg_namespace;"
@@ -635,14 +677,19 @@ def chk_catalog() -> None:
     pg_class_size = pg_class_size.strip()
 
     sql = "select pg_size_pretty(pg_relation_size('pg_class')),pg_relation_size('pg_class');"
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql, "-h", hostname, "-p", port, "-U", username, "-d", database],
-        capture_output=True, text=True, env=env
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
         error("pg_class master size error! \n")
         return
-    tmp_result = result.stdout.strip()
+    tmp_result = out.strip()
     tmpstr = tmp_result.split("|")
     pg_class_master = tmpstr[0]
     pg_class_master_int = int(tmpstr[1])
@@ -656,14 +703,19 @@ def chk_catalog() -> None:
 
     sql = ("create temp table tmp_pg_class_record as select * from pg_class;\n"
            "select pg_relation_size('tmp_pg_class_record');")
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-q", "-t", "-c", sql, "-h", hostname, "-p", port, "-U", username, "-d", database],
-        capture_output=True, text=True, env=env
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
         print("pg_class realsize error!")
         return
-    pg_class_realsize = int(result.stdout.strip())
+    pg_class_realsize = int(out.strip())
     pg_class_master_bloat = pg_class_master_int / pg_class_realsize if pg_class_realsize else 0
 
     sql = "select count(*) from pg_class;"
@@ -682,14 +734,19 @@ def chk_catalog() -> None:
     pg_attribute_size = pg_attribute_size.strip()
 
     sql = "select pg_size_pretty(pg_relation_size('pg_attribute')),pg_relation_size('pg_attribute');"
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql, "-h", hostname, "-p", port, "-U", username, "-d", database],
-        capture_output=True, text=True, env=env
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
         error("pg_attribute master size error! \n")
         return
-    tmp_result = result.stdout.strip()
+    tmp_result = out.strip()
     tmpstr = tmp_result.split("|")
     pg_attribute_master = tmpstr[0]
     pg_attribute_master_int = int(tmpstr[1])
@@ -719,14 +776,19 @@ def chk_catalog() -> None:
     else:
         sql = ("create temp table tmp_pg_attribute_record as select * from pg_attribute;\n"
                "select pg_relation_size('tmp_pg_attribute_record');")
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-q", "-t", "-c", sql, "-h", hostname, "-p", port, "-U", username, "-d", database],
-        capture_output=True, text=True, env=env
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
         print("pg_attribute realsize error!")
         return
-    pg_attribute_realsize = int(result.stdout.strip())
+    pg_attribute_realsize = int(out.strip())
     pg_attribute_master_bloat = pg_attribute_master_int / pg_attribute_realsize if pg_attribute_realsize else 0
 
     sql = "select count(*) from pg_attribute;"
@@ -748,24 +810,24 @@ def chk_catalog() -> None:
     partition_count = partition_count.strip()
 
     info("---pg_catalog info\n")
-    info_notimestr(f"pg_tables count:               {table_count}\n")
-    info_notimestr(f"pg_views count:                {view_count}\n")
-    info_notimestr(f"pg_namespace count:            {pg_namespace_count}\n")
-    info_notimestr(f"pg_namespace size:             {pg_namespace_size}\n")
-    info_notimestr(f"pg_namespace size in master:   {pg_namespace_master}\n")
-    info_notimestr(f"pg_namespace size in gpseg0:   {pg_namespace_gpseg0}\n")
-    info_notimestr(f"pg_namespace bloat in master:  {pg_namespace_master_bloat}\n")
-    info_notimestr(f"pg_class count:                {pg_class_count}\n")
-    info_notimestr(f"pg_class size:                 {pg_class_size}\n")
-    info_notimestr(f"pg_class size in master:       {pg_class_master}\n")
-    info_notimestr(f"pg_class size in gpseg0:       {pg_class_gpseg0}\n")
-    info_notimestr(f"pg_class bloat in master:      {pg_class_master_bloat}\n")
-    info_notimestr(f"pg_attribute count:            {pg_attribute_count}\n")
-    info_notimestr(f"pg_attribute size:             {pg_attribute_size}\n")
-    info_notimestr(f"pg_attribute size in master:   {pg_attribute_master}\n")
-    info_notimestr(f"pg_attribute size in gpseg0:   {pg_attribute_gpseg0}\n")
-    info_notimestr(f"pg_attribute bloat in master:  {pg_attribute_master_bloat}\n")
-    info_notimestr(f"partition count:               {partition_count}\n")
+    info_notimestr("pg_tables count:               {0}\n".format(table_count))
+    info_notimestr("pg_views count:                {0}\n".format(view_count))
+    info_notimestr("pg_namespace count:            {0}\n".format(pg_namespace_count))
+    info_notimestr("pg_namespace size:             {0}\n".format(pg_namespace_size))
+    info_notimestr("pg_namespace size in master:   {0}\n".format(pg_namespace_master))
+    info_notimestr("pg_namespace size in gpseg0:   {0}\n".format(pg_namespace_gpseg0))
+    info_notimestr("pg_namespace bloat in master:  {0}\n".format(pg_namespace_master_bloat))
+    info_notimestr("pg_class count:                {0}\n".format(pg_class_count))
+    info_notimestr("pg_class size:                 {0}\n".format(pg_class_size))
+    info_notimestr("pg_class size in master:       {0}\n".format(pg_class_master))
+    info_notimestr("pg_class size in gpseg0:       {0}\n".format(pg_class_gpseg0))
+    info_notimestr("pg_class bloat in master:      {0}\n".format(pg_class_master_bloat))
+    info_notimestr("pg_attribute count:            {0}\n".format(pg_attribute_count))
+    info_notimestr("pg_attribute size:             {0}\n".format(pg_attribute_size))
+    info_notimestr("pg_attribute size in master:   {0}\n".format(pg_attribute_master))
+    info_notimestr("pg_attribute size in gpseg0:   {0}\n".format(pg_attribute_gpseg0))
+    info_notimestr("pg_attribute bloat in master:  {0}\n".format(pg_attribute_master_bloat))
+    info_notimestr("partition count:               {0}\n".format(partition_count))
     info_notimestr("\n")
 
     # Table type info per schema
@@ -800,7 +862,7 @@ def chk_catalog() -> None:
         error("Table type count per schema error! \n")
         return
     info("---Table type info per schema\n")
-    info_notimestr(f"{tabletype}\n")
+    info_notimestr("{0}\n".format(tabletype))
 
     # Table type total
     if gpver == "gp7" or "cbdb" in gpver:
@@ -833,7 +895,7 @@ def chk_catalog() -> None:
         error("Table type count error! \n")
         return
     info("---Table type info\n")
-    info_notimestr(f"{tabletype}\n")
+    info_notimestr("{0}\n".format(tabletype))
 
     # pg_stat_operations
     sql = "select * from pg_stat_operations where objid in (1249,1259) order by objname,statime;"
@@ -845,10 +907,10 @@ def chk_catalog() -> None:
         error("Check pg_stat_operations of pg_class/pg_attribute error! \n")
         return
     info("---Check pg_stat_operations info\n")
-    info_notimestr(f"{stat_ops}\n")
+    info_notimestr("{0}\n".format(stat_ops))
 
 
-def chk_partition_info() -> None:
+def chk_partition_info():
     if gpver == "gp7" or "cbdb" in gpver:
         sql = ("SELECT tablename,COUNT(*) FROM ("
                "SELECT pg_partition_root(c.oid)::regclass AS tablename, "
@@ -864,7 +926,7 @@ def chk_partition_info() -> None:
             error("Subpartition count error! \n")
             return
         info("---Subpartition info\n")
-        info_notimestr(f"{subpart}\n")
+        info_notimestr("{0}\n".format(subpart))
     else:
         sql = ("select schemaname||'.'||tablename as tablename,count(*) as sub_count from pg_partitions "
                "group by 1 order by 2 desc limit 100;")
@@ -876,7 +938,7 @@ def chk_partition_info() -> None:
             error("Subpartition count error! \n")
             return
         info("---Subpartition info\n")
-        info_notimestr(f"{subpart}\n")
+        info_notimestr("{0}\n".format(subpart))
 
         sql = ("select schemaname||'.'||tablename as tablename,partitionschemaname||'.'||partitiontablename as partitiontablename "
                "from pg_partitions where schemaname<>partitionschemaname order by 1,2;")
@@ -888,27 +950,29 @@ def chk_partition_info() -> None:
             error("Check partition schema error! \n")
             return
         info("---Check partition schema\n")
-        info_notimestr(f"{part_schema}\n")
+        info_notimestr("{0}\n".format(part_schema))
 
 
-def _skew_worker(schema: str, h: str, p: str, u: str, d: str) -> None:
+def _skew_worker(schema, h, p, u, d):
     """Child process worker for skew check."""
-    sql = f"copy (select * from skewcheck_func('{schema}')) to '/tmp/tmpskew.{schema}.dat';"
-    result = subprocess.run(
+    sql = "copy (select * from skewcheck_func('{0}')) to '/tmp/tmpskew.{0}.dat';".format(schema)
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql, "-h", h, "-p", p, "-U", u, "-d", d],
-        capture_output=True, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if proc.returncode:
         sys.exit(-1)
-    sql = f"copy check_skew_result from '/tmp/tmpskew.{schema}.dat';"
-    subprocess.run(
+    sql = "copy check_skew_result from '/tmp/tmpskew.{0}.dat';".format(schema)
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql, "-h", h, "-p", p, "-U", u, "-d", d],
-        capture_output=True, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
+    proc.communicate()
 
 
-def skewcheck() -> None:
-    print(f"---Begin to check skew, jobs [{concurrency}]")
+def skewcheck():
+    print("---Begin to check skew, jobs [{0}]".format(concurrency))
 
     sql = ("drop table if exists check_skew_result; "
            "create table check_skew_result("
@@ -921,7 +985,7 @@ def skewcheck() -> None:
         return
 
     itotal = len(schema_list)
-    processes: list[Process] = []
+    processes = []
 
     for icalc in range(itotal):
         while len([p for p in processes if p.is_alive()]) >= concurrency:
@@ -932,12 +996,12 @@ def skewcheck() -> None:
         processes.append(p)
         active = len([pp for pp in processes if pp.is_alive()])
         finished = len([pp for pp in processes if not pp.is_alive()])
-        print(f"Child process count [{active}], finish count[{finished}/{itotal}]")
+        print("Child process count [{0}], finish count[{1}/{2}]".format(active, finished, itotal))
 
     for p in processes:
         p.join()
 
-    print(f"Child process count [0], finish count[{itotal}/{itotal}]")
+    print("Child process count [0], finish count[{0}/{0}]".format(itotal))
 
     sql = "select * from check_skew_result order by tablename,skew desc;"
     ret, skewresult = run_psql([
@@ -948,37 +1012,44 @@ def skewcheck() -> None:
         error("Query skew check result error! \n")
         return
     info("---Skew check\n")
-    info_notimestr(f"\n{skewresult}\n")
+    info_notimestr("\n{0}\n".format(skewresult))
 
 
-def _bloat_worker(schema: str, h: str, p: str, u: str, d: str) -> None:
+def _bloat_worker(schema, h, p, u, d):
     """Child process worker for AO bloat check."""
-    sql = f"copy (select schemaname||'.'||tablename,'ao',bloat from AOtable_bloatcheck('{schema}') where bloat>1.9) to '/tmp/tmpaobloat.{schema}.dat';"
-    result = subprocess.run(
+    sql = "copy (select schemaname||'.'||tablename,'ao',bloat from AOtable_bloatcheck('{0}') where bloat>1.9) to '/tmp/tmpaobloat.{0}.dat';".format(schema)
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql, "-h", h, "-p", p, "-U", u, "-d", d],
-        capture_output=True, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if proc.returncode:
         sys.exit(-1)
-    sql = f"copy bloat_skew_result from '/tmp/tmpaobloat.{schema}.dat';"
-    subprocess.run(
+    sql = "copy bloat_skew_result from '/tmp/tmpaobloat.{0}.dat';".format(schema)
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql, "-h", h, "-p", p, "-U", u, "-d", d],
-        capture_output=True, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
+    proc.communicate()
 
 
-def bloatcheck() -> None:
-    print(f"---Begin to check bloat, jobs [{concurrency}]")
+def bloatcheck():
+    print("---Begin to check bloat, jobs [{0}]".format(concurrency))
 
     sql = ("drop table if exists bloat_skew_result; "
            "create table bloat_skew_result("
            "tablename text, relstorage varchar(10), bloat numeric(18,2)"
            ") distributed randomly;")
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql, "-h", hostname, "-p", port, "-U", username, "-d", database],
-        capture_output=True, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
         error("recreate bloat_skew_result error! \n")
         return
 
@@ -988,7 +1059,7 @@ def bloatcheck() -> None:
         pg_class_sql = "insert into pg_class_bloat_chk select * from pg_class where relkind='r' and relstorage='h';"
 
     # Heap table bloat check
-    sql = (f"drop table if exists pg_stats_bloat_chk; "
+    sql = ("drop table if exists pg_stats_bloat_chk; "
            "create temp table pg_stats_bloat_chk "
            "(schemaname varchar(80), tablename varchar(80), attname varchar(100), "
            "null_frac float4, avg_width int4, n_distinct float4) distributed by (tablename); "
@@ -999,9 +1070,9 @@ def bloatcheck() -> None:
            "(oid_ss integer, nspname varchar(80), nspowner integer) distributed by (oid_ss); "
            "insert into pg_stats_bloat_chk "
            "select schemaname,tablename,attname,null_frac,avg_width,n_distinct from pg_stats; "
-           f"{pg_class_sql} "
-           f"insert into pg_namespace_bloat_chk "
-           f"select oid,nspname,nspowner from pg_namespace where nspname in {schema_str}; "
+           "{0} "
+           "insert into pg_namespace_bloat_chk "
+           "select oid,nspname,nspowner from pg_namespace where nspname in {1}; "
            "insert into bloat_skew_result "
            "SELECT schemaname||'.'||tablename,'h',bloat "
            "FROM ( "
@@ -1041,19 +1112,24 @@ def bloatcheck() -> None:
            "JOIN pg_namespace_bloat_chk nn ON cc.relnamespace = nn.oid_ss AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema' "
            ") AS sml "
            "WHERE sml.relpages - live_size_blocks > 2 "
-           ") AS blochk where wastedsize>104857600 and bloat>2;")
+           ") AS blochk where wastedsize>104857600 and bloat>2;").format(pg_class_sql, schema_str)
 
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql, "-h", hostname, "-p", port, "-U", username, "-d", database],
-        capture_output=True, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
-    if result.returncode:
-        error(f"Heap table bloat check error! \n{result.stdout}\n")
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
+        error("Heap table bloat check error! \n{0}\n".format(out))
         return
 
     # AO table bloat check with parallel workers
     itotal = len(schema_list)
-    processes: list[Process] = []
+    processes = []
 
     for icalc in range(itotal):
         while len([p for p in processes if p.is_alive()]) >= concurrency:
@@ -1064,12 +1140,12 @@ def bloatcheck() -> None:
         processes.append(p)
         active = len([pp for pp in processes if pp.is_alive()])
         finished = len([pp for pp in processes if not pp.is_alive()])
-        print(f"Child process count [{active}], finish count[{finished}/{itotal}]")
+        print("Child process count [{0}], finish count[{1}/{2}]".format(active, finished, itotal))
 
     for p in processes:
         p.join()
 
-    print(f"Child process count [0], finish count[{itotal}/{itotal}]")
+    print("Child process count [0], finish count[{0}/{0}]".format(itotal))
 
     sql = "select * from bloat_skew_result order by relstorage,bloat desc;"
     ret, bloatresult = run_psql([
@@ -1080,7 +1156,7 @@ def bloatcheck() -> None:
         error("Query bloat check result error! \n")
         return
     info("---Bloat check\n")
-    info_notimestr(f"\n{bloatresult}\n")
+    info_notimestr("\n{0}\n".format(bloatresult))
 
     # Generate bloat fix script
     sql = "select count(*) from bloat_skew_result;"
@@ -1091,32 +1167,33 @@ def bloatcheck() -> None:
     bloatcount = int(bloatcount_str.strip())
     logday = get_current_date()
     if bloatcount > 0:
-        sql = (f"copy (select 'alter table '||tablename||' set with (reorganize=true); analyze '||tablename||';' from bloat_skew_result) "
-               f"to '{LOG_DIR}/fix_ao_table_script_{database}_{logday}.sql';")
+        sql = ("copy (select 'alter table '||tablename||' set with (reorganize=true); analyze '||tablename||';' from bloat_skew_result) "
+               "to '{0}/fix_ao_table_script_{1}_{2}.sql';").format(LOG_DIR, database, logday)
         ret, _ = run_psql_simple(sql)
         if ret:
             error("Unload bloat table fix script error! \n")
             return
-        info_notimestr(f"\nPlease check fix script: {LOG_DIR}/fix_ao_table_script_{database}_{logday}.sql\n")
+        info_notimestr("\nPlease check fix script: {0}/fix_ao_table_script_{1}_{2}.sql\n".format(LOG_DIR, database, logday))
 
 
-def _defpart_worker(tablename: str, h: str, p: str, u: str, d: str) -> None:
+def _defpart_worker(tablename, h, p, u, d):
     """Child process worker for default partition count."""
-    sql = f"insert into def_partition_count_result select '{tablename}',count(*) from {tablename};"
-    subprocess.run(
+    sql = "insert into def_partition_count_result select '{0}',count(*) from {0};".format(tablename)
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql, "-h", h, "-p", p, "-U", u, "-d", d],
-        capture_output=True, text=True
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
+    proc.communicate()
 
 
-def def_partition() -> None:
-    print(f"---Begin to check default partition, jobs [{concurrency}]")
+def def_partition():
+    print("---Begin to check default partition, jobs [{0}]".format(concurrency))
 
     if gpver == "gp7" or "cbdb" in gpver:
-        sql = (f"select c.nspname||'.'||b.relname from pg_partitioned_table a,pg_class b,pg_namespace c "
-               f"where a.partdefid=b.oid and b.relnamespace=c.oid and b.relkind='r' and a.partdefid>0 and c.nspname in {schema_str};")
+        sql = ("select c.nspname||'.'||b.relname from pg_partitioned_table a,pg_class b,pg_namespace c "
+               "where a.partdefid=b.oid and b.relnamespace=c.oid and b.relkind='r' and a.partdefid>0 and c.nspname in {0};").format(schema_str)
     else:
-        sql = f"select partitionschemaname||'.'||partitiontablename from pg_partitions where partitionisdefault=true and partitionschemaname in {schema_str};"
+        sql = "select partitionschemaname||'.'||partitiontablename from pg_partitions where partitionisdefault=true and partitionschemaname in {0};".format(schema_str)
 
     ret, output = run_psql([
         "psql", "-A", "-X", "-t", "-c", sql,
@@ -1137,7 +1214,7 @@ def def_partition() -> None:
         error("recreate def_partition_count_result error! \n")
         return
 
-    processes: list[Process] = []
+    processes = []
 
     for icalc in range(itotal):
         while len([p for p in processes if p.is_alive()]) >= concurrency:
@@ -1148,12 +1225,12 @@ def def_partition() -> None:
         processes.append(p)
         active = len([pp for pp in processes if pp.is_alive()])
         finished = len([pp for pp in processes if not pp.is_alive()])
-        print(f"Child process count [{active}], finish count[{finished}/{itotal}]")
+        print("Child process count [{0}], finish count[{1}/{2}]".format(active, finished, itotal))
 
     for p in processes:
         p.join()
 
-    print(f"Child process count [0], finish count[{itotal}/{itotal}]")
+    print("Child process count [0], finish count[{0}/{0}]".format(itotal))
 
     sql = "select * from def_partition_count_result where row_count>0 order by row_count desc;"
     ret, defpartresult = run_psql([
@@ -1164,10 +1241,10 @@ def def_partition() -> None:
         error("Query default partition count result error! \n")
         return
     info("---Default partition check\n")
-    info_notimestr(f"\n{defpartresult}\n")
+    info_notimestr("\n{0}\n".format(defpartresult))
 
 
-def chk_os_param() -> None:
+def chk_os_param():
     print("---Check OS parameter")
 
     checks = [
@@ -1179,19 +1256,24 @@ def chk_os_param() -> None:
     ]
 
     for cmd, label, err_msg, do_return in checks:
-        result = subprocess.run(
-            f'gpssh -d 0 -f /tmp/tmpallhosts "{cmd}"',
-            shell=True, capture_output=True, text=True
+        proc = subprocess.Popen(
+            'gpssh -d 0 -f /tmp/tmpallhosts "{0}"'.format(cmd),
+            shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
-        if result.returncode:
+        out, err = proc.communicate()
+        if hasattr(out, 'decode'):
+            out = out.decode('utf-8', 'replace')
+        if hasattr(err, 'decode'):
+            err = err.decode('utf-8', 'replace')
+        if proc.returncode:
             error(err_msg)
             if do_return:
                 return
-        info(f"---{label} ...\n")
-        info_notimestr(f"{result.stdout}\n\n")
+        info("---{0} ...\n".format(label))
+        info_notimestr("{0}\n\n".format(out))
 
 
-def chk_gpdb_param() -> None:
+def chk_gpdb_param():
     print("---Check GPDB parameter")
 
     if gpver == "gp7" or "cbdb" in gpver:
@@ -1199,15 +1281,20 @@ def chk_gpdb_param() -> None:
     else:
         master_dir = os.environ.get("MASTER_DATA_DIRECTORY", "")
 
-    result = subprocess.run(
-        f"cat {master_dir}/postgresql.conf | grep -vE '^\\s*#|^\\s*$'",
-        shell=True, capture_output=True, text=True
+    proc = subprocess.Popen(
+        "cat {0}/postgresql.conf | grep -vE '^\\s*#|^\\s*$'".format(master_dir),
+        shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
         error("Check postgresql.conf error\n")
         return
     info("---Check setting in postgresql.conf ...\n")
-    info_notimestr(f"{result.stdout}\n\n")
+    info_notimestr("{0}\n\n".format(out))
 
     if gpver in ("gp6", "gp7") or "cbdb" in gpver:
         sql = ("select a.datname,array_to_string(b.setconfig,',') db_setting "
@@ -1222,7 +1309,7 @@ def chk_gpdb_param() -> None:
         error("Query setting on database error! \n")
         return
     info("---Check setting on database ...\n")
-    info_notimestr(f"{param_info}\n")
+    info_notimestr("{0}\n".format(param_info))
 
     if gpver in ("gp6", "gp7") or "cbdb" in gpver:
         sql = ("select a.rolname,array_to_string(b.setconfig,',') role_setting "
@@ -1237,10 +1324,10 @@ def chk_gpdb_param() -> None:
         error("Query setting on role error! \n")
         return
     info("---Check setting on role ...\n")
-    info_notimestr(f"{param_info}\n")
+    info_notimestr("{0}\n".format(param_info))
 
 
-def main() -> None:
+def main():
     global hostname, port, database, username, password
     global IS_ALLDB, IS_ALLSCHEMA, IS_SKIPUDF, FUNC_DIR
     global CHK_SCHEMA, SCHEMA_FILE, concurrency, LOG_DIR, gpver
@@ -1264,7 +1351,7 @@ def main() -> None:
     parser.add_argument("--create-udf", default="")
 
     if len(sys.argv) == 1:
-        print(f"Input error: \nPlease show help: python3 {cmd_name} --help")
+        print("Input error: \nPlease show help: python3 {0} --help".format(cmd_name))
         sys.exit(0)
 
     args = parser.parse_args()
@@ -1286,9 +1373,9 @@ def main() -> None:
     FUNC_DIR = args.create_udf
 
     home_dir = os.environ.get("HOME", "")
-    LOG_DIR = args.log_dir if args.log_dir else f"{home_dir}/gpAdminLogs"
+    LOG_DIR = args.log_dir if args.log_dir else "{0}/gpAdminLogs".format(home_dir)
 
-    print(f"LOG Directory: {LOG_DIR}")
+    print("LOG Directory: {0}".format(LOG_DIR))
 
     if IS_ALLDB and database:
         print("Input error: The following options may not be specified together: --alldb, --dbname <database_name>")
@@ -1326,7 +1413,7 @@ def main() -> None:
     info("-----------------------------------------------------\n")
     info("------Begin GPDB health check\n")
     info("-----------------------------------------------------\n")
-    info_notimestr(f"Hostname: {hostname}\nPort: {port}\nUsername: {username}\nConcurrency: {concurrency}\nLogDIR: {LOG_DIR}\n")
+    info_notimestr("Hostname: {0}\nPort: {1}\nUsername: {2}\nConcurrency: {3}\nLogDIR: {4}\n".format(hostname, port, username, concurrency, LOG_DIR))
     gpver = get_gpver()
     info("-----------------------------------------------------\n")
     get_dbname()
@@ -1341,9 +1428,9 @@ def main() -> None:
 
     for i in range(len(dbname_list)):
         database = dbname_list[i].strip()
-        print(f"------Begin to check database: {database}")
+        print("------Begin to check database: {0}".format(database))
         info("-----------------------------------------------------\n")
-        info(f"------Begin to check database: {database}\n")
+        info("------Begin to check database: {0}\n".format(database))
         info("-----------------------------------------------------\n")
         get_schema()
         has_udf = check_udf()

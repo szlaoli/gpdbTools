@@ -1,63 +1,64 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+from __future__ import print_function
+
 import argparse
 import os
 import subprocess
 import sys
 import tempfile
 from datetime import datetime
-from typing import IO, Optional
 
 
 cmd_name = os.path.basename(sys.argv[0])
-fh_log: Optional[IO[str]] = None
-logfilename: str = ""
-gpver: str = ""
+fh_log = None
+logfilename = ""
+gpver = ""
 
 
-def get_current_date() -> str:
+def get_current_date():
     return datetime.now().strftime("%Y%m%d")
 
 
-def show_time() -> str:
+def show_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def init_log() -> None:
+def init_log():
     global fh_log, logfilename
     logday = get_current_date()
     home = os.environ.get("HOME", "")
-    logfilename = f"{home}/gpAdminLogs/{cmd_name}_{logday}.log"
+    logfilename = "{}/gpAdminLogs/{}_{}.log".format(home, cmd_name, logday)
     try:
         fh_log = open(logfilename, "a")
     except OSError:
-        print(f"[ERROR]:Cound not open logfile {logfilename}")
+        print("[ERROR]:Cound not open logfile {}".format(logfilename))
         sys.exit(-1)
 
 
-def info(printmsg: str) -> int:
+def info(printmsg):
     if fh_log:
-        fh_log.write(f"[{show_time()} INFO] {printmsg}")
+        fh_log.write("[{} INFO] {}".format(show_time(), printmsg))
     return 0
 
 
-def info_notimestr(printmsg: str) -> int:
+def info_notimestr(printmsg):
     if fh_log:
         fh_log.write(printmsg)
     return 0
 
 
-def error(printmsg: str) -> int:
+def error(printmsg):
     if fh_log:
-        fh_log.write(f"[{show_time()} ERROR] {printmsg}")
+        fh_log.write("[{} ERROR] {}".format(show_time(), printmsg))
     return 0
 
 
-def close_log() -> None:
+def close_log():
     if fh_log:
         fh_log.close()
 
 
-def set_env(hostname: str, port: str, database: str, username: str, password: str) -> None:
+def set_env(hostname, port, database, username, password):
     os.environ["PGHOST"] = hostname
     os.environ["PGPORT"] = port
     os.environ["PGDATABASE"] = database
@@ -65,16 +66,22 @@ def set_env(hostname: str, port: str, database: str, username: str, password: st
     os.environ["PGPASSWORD"] = password
 
 
-def get_gpver() -> str:
+def get_gpver():
     sql = "select version();"
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["psql", "-A", "-X", "-t", "-c", sql, "-d", "postgres"],
-        capture_output=True, text=True
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    if result.returncode:
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    if proc.returncode:
         print("Get GP version error!")
         sys.exit(1)
-    sver = result.stdout.strip()
+    sver = out.strip()
     tmpstr = sver.split(" ")
     print(tmpstr[4])
     tmpver = tmpstr[4].split(".")
@@ -82,15 +89,20 @@ def get_gpver() -> str:
     return tmpver[0]
 
 
-def run_psql(args: list[str]) -> tuple[int, str]:
-    result = subprocess.run(args, capture_output=True, text=True)
-    return result.returncode, result.stdout
+def run_psql(args):
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = proc.communicate()
+    if hasattr(out, 'decode'):
+        out = out.decode('utf-8', 'replace')
+    if hasattr(err, 'decode'):
+        err = err.decode('utf-8', 'replace')
+    return proc.returncode, out
 
 
 def check_panic_on_allhost(
-    hostname: str, port: str, username: str, database: str, chk_date: str
-) -> None:
-    sql = f"""
+    hostname, port, username, database, chk_date
+):
+    sql = """
   DROP EXTERNAL TABLE IF EXISTS check_panic_on_seg_ext;
   CREATE EXTERNAL WEB TABLE check_panic_on_seg_ext
   (
@@ -180,7 +192,7 @@ def check_panic_on_allhost(
   split_part(split_part(split_part(log_msg,'(',2),')',1),' ',2)::int pid,
   substr(log_msg,position('.csv' in log_msg)+5,length(log_msg)-position('.csv' in log_msg)-5) logmsg
   from check_terminate_on_master_ext;
-  """
+  """.format(chk_date=chk_date)
 
     tmpfile = "/tmp/.tmpsqlfile.sql"
     try:
@@ -212,7 +224,7 @@ def check_panic_on_allhost(
         return
     check_panic_count = int(check_panic_count_str.strip())
 
-    sess_list: list[str] = []
+    sess_list = []
     if check_panic_count > 0:
         sql = "select * from check_panic order by 1,2,3;"
         ret, panic_info = run_psql([
@@ -222,8 +234,8 @@ def check_panic_on_allhost(
         if ret:
             error("Query PANIC information error! \n")
             return
-        info_notimestr(f"\n{panic_info}\n")
-        print(f"\n{panic_info}")
+        info_notimestr("\n{}\n".format(panic_info))
+        print("\n{}".format(panic_info))
 
         sql = "select distinct sess_id from check_panic;"
         ret, sess_output = run_psql([
@@ -254,7 +266,7 @@ def check_panic_on_allhost(
         return
     check_terminate_count = int(check_terminate_count_str.strip())
 
-    pid_list: list[str] = []
+    pid_list = []
     if check_terminate_count > 0:
         sql = ("select * from check_terminate a left join check_panic b "
                "on a.hostname=b.hostname and a.logfilename=b.logfilename and a.pid=b.pid "
@@ -266,8 +278,8 @@ def check_panic_on_allhost(
         if ret:
             error("Query process terminate information error! \n")
             return
-        info_notimestr(f"\n{terminate_info}\n")
-        print(f"\n{terminate_info}")
+        info_notimestr("\n{}\n".format(terminate_info))
+        print("\n{}".format(terminate_info))
 
         sql = ("select a.hostname||'|'||a.logfilename||'|'||to_char(a.logtime::timestamp,'YYYY-MM-DD HH24:MI:SS')||'|p'||a.pid::text "
                "from check_terminate a left join check_panic b on a.hostname=b.hostname and a.logfilename=b.logfilename and a.pid=b.pid "
@@ -296,14 +308,23 @@ def check_panic_on_allhost(
         print("\n-------------Show PANIC LOG--------------")
         for sess_id in sess_list:
             sess_id = sess_id.strip()
-            info_notimestr(f"---===Session ID: {sess_id}===---\n")
-            print(f"---===Session ID: {sess_id}===---")
-            result = subprocess.run(
-                f"gplogfilter -f '{sess_id}' {master_data_dir}/pg_log/gpdb-{chk_date}*csv 2>/dev/null |tail -100",
-                shell=True, capture_output=True, text=True
+            info_notimestr("---===Session ID: {}===---\n".format(sess_id))
+            print("---===Session ID: {}===---".format(sess_id))
+            devnull = open(os.devnull, 'w')
+            proc = subprocess.Popen(
+                "gplogfilter -f '{sess_id}' {master_data_dir}/pg_log/gpdb-{chk_date}*csv 2>/dev/null |tail -100".format(
+                    sess_id=sess_id, master_data_dir=master_data_dir, chk_date=chk_date
+                ),
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
-            showlogmsg = result.stdout
-            info_notimestr(f"{showlogmsg}\n")
+            out, err = proc.communicate()
+            devnull.close()
+            if hasattr(out, 'decode'):
+                out = out.decode('utf-8', 'replace')
+            showlogmsg = out
+            info_notimestr("{}\n".format(showlogmsg))
             print(showlogmsg)
 
     if pid_list:
@@ -311,18 +332,25 @@ def check_panic_on_allhost(
         print("\n-------------Show process terminated LOG--------------")
         for pid_entry in pid_list:
             tmpstr = pid_entry.strip().split("|")
-            info_notimestr(f"---===Hostname: {tmpstr[0]}, Logfilename: {tmpstr[1]}, PID: {tmpstr[3]}===---\n")
-            print(f"---===Hostname: {tmpstr[0]}, Logfilename: {tmpstr[1]}, PID: {tmpstr[3]}===---")
-            result = subprocess.run(
-                f"ssh {tmpstr[0]} \"gplogfilter -f '{tmpstr[3]}' -e '{tmpstr[2]}' {tmpstr[1]} 2>/dev/null |tail -50\"",
-                shell=True, capture_output=True, text=True
+            info_notimestr("---===Hostname: {}, Logfilename: {}, PID: {}===---\n".format(tmpstr[0], tmpstr[1], tmpstr[3]))
+            print("---===Hostname: {}, Logfilename: {}, PID: {}===---".format(tmpstr[0], tmpstr[1], tmpstr[3]))
+            proc = subprocess.Popen(
+                "ssh {hostname} \"gplogfilter -f '{pid}' -e '{logtime}' {logfile} 2>/dev/null |tail -50\"".format(
+                    hostname=tmpstr[0], pid=tmpstr[3], logtime=tmpstr[2], logfile=tmpstr[1]
+                ),
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
-            showlogmsg = result.stdout
-            info_notimestr(f"{showlogmsg}\n")
+            out, err = proc.communicate()
+            if hasattr(out, 'decode'):
+                out = out.decode('utf-8', 'replace')
+            showlogmsg = out
+            info_notimestr("{}\n".format(showlogmsg))
             print(showlogmsg)
 
 
-def main() -> None:
+def main():
     global gpver
 
     parser = argparse.ArgumentParser(
@@ -345,7 +373,7 @@ def main() -> None:
                         help="Checking PANIC date, format: YYYY-MM-DD / YYYY-MM")
 
     if len(sys.argv) == 1:
-        print(f"Input error: \nPlease show help: python3 {cmd_name} --help")
+        print("Input error: \nPlease show help: python {} --help".format(cmd_name))
         sys.exit(0)
 
     args = parser.parse_args()
@@ -369,7 +397,7 @@ def main() -> None:
             database = "postgres"
 
     if chk_date is None or (len(chk_date) != 10 and len(chk_date) != 7):
-        print(f"Input error: check_date format: YYYY-MM-DD / YYYY-MM\nPlease show help: python3 {cmd_name} --help")
+        print("Input error: check_date format: YYYY-MM-DD / YYYY-MM\nPlease show help: python {} --help".format(cmd_name))
         sys.exit(0)
 
     set_env(hostname, port, database, username, password)
@@ -386,7 +414,7 @@ def main() -> None:
     check_panic_on_allhost(hostname, port, username, database, chk_date)
 
     print("---------------------------------------------------------------------------------------")
-    print(f"------Check {logfilename} for more detail info.")
+    print("------Check {} for more detail info.".format(logfilename))
     print("---------------------------------------------------------------------------------------")
     close_log()
 
